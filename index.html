@@ -320,14 +320,7 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
 .w-node.me .w-name { font: 400 15px var(--display); }
 
 
-/* Bring your own splash art */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-.artbox { display: grid; gap: 14px; padding: 16px; border: 3px dashed var(--ink); position: relative; }
-.artbox.drag { border-style: solid; background: color-mix(in srgb, var(--spot) 18%, var(--paper)); }
-.artbox p:not(.label):not(.status) { max-width: 62ch; font-size: var(--step--1); color: var(--muted); font-weight: 700; margin-top: 6px; }
-.art-actions { display: flex; flex-wrap: wrap; gap: 12px; }
-.art-actions .btn { min-height: 46px; padding: 8px 18px; font-size: var(--step--1); }
-#artFile:focus-visible + .btn, label.btn:focus-within { outline: 3px solid var(--spot); outline-offset: 4px; }
 
 
 /* Story clock */
@@ -408,6 +401,46 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
   @keyframes slamp { from { transform: translateX(50%) rotate(2deg) scale(1.3); opacity: 0; } }
 }
 @media (prefers-reduced-motion: reduce) { .slam .portrait { animation: none; } }
+
+
+/* History and result codes */
+.history, .codebox { display: grid; gap: 10px; position: relative; }
+.hist-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.hist-head .label { margin: 0; }
+.hist-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.hist { display: grid; grid-template-columns: minmax(0, 1fr) auto; border: 3px solid var(--ink); background: var(--paper); border-left: 10px solid var(--hc); }
+.hist-open { display: flex; gap: 10px; align-items: center; text-align: left; padding: 8px; border: 0; background: none; min-width: 0; }
+.hist-open img { width: 56px; height: 56px; object-fit: cover; object-position: top; border: 2.5px solid var(--ink); flex-shrink: 0; }
+.hist-open span { display: grid; min-width: 0; line-height: 1.3; }
+.hist-open b { font-size: var(--step-0); overflow-wrap: anywhere; }
+.hist-open small { font-size: var(--step--1); color: var(--muted); font-weight: 700; }
+.hist-open:focus-visible, .hist-del:focus-visible { outline: 3px solid var(--spot); outline-offset: -3px; }
+@media (hover: hover) { .hist-open:hover b { text-decoration: underline; text-decoration-color: var(--spot); text-decoration-thickness: 2px; } }
+.hist-del { border: 0; border-left: 2px solid var(--ink); background: none; width: 40px; font: 700 var(--step-1)/1 var(--body); color: var(--muted); }
+.codebox label { font: 700 var(--step--1)/1.3 var(--body); letter-spacing: .1em; text-transform: uppercase; }
+.code-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.code-row input, .cardside input {
+  flex: 1 1 220px; min-width: 0; min-height: 48px; padding: 8px 12px;
+  border: 3px solid var(--ink); background: var(--paper); color: var(--ink); font: 700 var(--step-0)/1.2 var(--body); border-radius: 0;
+}
+.code-row input:focus-visible, .cardside input:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
+.shared-banner { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; justify-content: space-between; border: 3px solid var(--ink); padding: 12px 16px; background: color-mix(in srgb, var(--spot) 20%, var(--paper)); }
+
+/* Trading card */
+.cardgrid { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.cardwrap { --rx: 0deg; --ry: 0deg; --mx: 50%; --my: 50%; position: relative; perspective: 900px; max-width: 340px; width: 100%; }
+.cardwrap img { display: block; width: 100%; height: auto; border-radius: 16px; transform: rotateX(var(--rx)) rotateY(var(--ry)); transition: transform .15s ease-out; box-shadow: 8px 10px 0 var(--ink); background: var(--ink); aspect-ratio: 750 / 1050; }
+.cardwrap::after {
+  content: ""; position: absolute; inset: 0; border-radius: 16px; pointer-events: none; mix-blend-mode: overlay;
+  background: radial-gradient(circle at var(--mx) var(--my), rgba(255,255,255,.55), rgba(255,255,255,0) 45%), linear-gradient(115deg, rgba(255,0,170,.18), rgba(0,220,255,.18), rgba(255,240,0,.18));
+  transform: rotateX(var(--rx)) rotateY(var(--ry));
+}
+.cardside { display: grid; gap: 10px; min-width: 0; }
+.card-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.card-actions .btn { min-height: 46px; padding: 8px 18px; font-size: var(--step--1); }
+.cardside code { font: 700 var(--step--1)/1.3 ui-monospace, "SFMono-Regular", Menlo, monospace; color: var(--ink); overflow-wrap: anywhere; }
+@media (max-width: 620px) { .cardgrid { grid-template-columns: 1fr; } .cardwrap { justify-self: center; } }
+@media (prefers-reduced-motion: reduce) { .cardwrap img { transition: none; } }
 
 /* Character file */
 .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
@@ -497,7 +530,7 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
   <section id="coverView" class="cover" aria-labelledby="coverTitle">
     <div class="burst"></div>
     <div class="sfx" aria-hidden="true">ゴゴゴゴ</div>
-    <p class="volume"><b>Vol. 5</b> <span id="coverCount"></span></p>
+    <p class="volume"><b>Vol. 6</b> <span id="coverCount"></span></p>
     <h1 class="title" id="coverTitle" tabindex="-1">Which <em>anime</em> character are you?</h1>
     <p class="pitch" id="pitch"></p>
     <div class="pool" role="group" aria-labelledby="poolLabel">
@@ -516,6 +549,22 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
       <p id="castRoles"></p>
       <ul class="chips" id="castTypes" aria-label="Personality types in this volume"></ul>
     </div>
+    <section class="history" id="historyBox" hidden aria-labelledby="histTitle">
+      <div class="hist-head">
+        <h2 class="label" id="histTitle"><small lang="ja">記録</small>Your past results</h2>
+        <button type="button" class="mini" id="histClear">Clear history</button>
+      </div>
+      <ul class="hist-list" id="histList"></ul>
+      <p class="note" style="margin:0">Saved in this browser. To keep a result on another device, open it and copy its result link.</p>
+    </section>
+    <form class="codebox" id="codeForm" autocomplete="off">
+      <label for="codeInput">Have a result code or link?</label>
+      <div class="code-row">
+        <input id="codeInput" type="text" inputmode="text" spellcheck="false" placeholder="Paste a code like 5a0213… or a result link">
+        <button class="btn" type="submit" id="codeGo">Open result</button>
+      </div>
+      <p class="status" id="codeStatus" role="status"></p>
+    </form>
   </section>
 
   <section id="chapterView" class="chapter" hidden>
@@ -548,6 +597,10 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
   </section>
 
   <section id="resultView" class="result" hidden>
+    <div class="shared-banner" id="sharedBanner" hidden>
+      <p><b>Someone shared their result with you.</b> Take the quiz to find out who you are.</p>
+      <button class="btn primary" type="button" id="sharedStart">Take the quiz</button>
+    </div>
     <div class="reveal" id="reveal">
       <canvas id="splash" aria-hidden="true"></canvas>
       <img id="resPortrait" class="portrait" alt="" hidden referrerpolicy="no-referrer">
@@ -566,23 +619,29 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
       <p class="credit" id="resCredit" hidden></p>
     </div>
 
-    <div class="artbox" id="artBox">
-      <div>
-        <p class="label" style="margin:0"><small lang="ja">表紙</small><span id="artTitle">Make the splash art yours</span></p>
-        <p id="artHelp">Open the official portrait link, copy the image, then come back and paste it anywhere on this page. Or choose a saved file. It becomes the splash art and portrait for this character, and stays in this browser only.</p>
-      </div>
-      <div class="art-actions">
-        <label class="btn primary">Choose a picture<input type="file" id="artFile" accept="image/*" class="sr-only"></label>
-        <button class="btn" type="button" id="artPaste">Paste from clipboard</button>
-        <button class="btn" type="button" id="artRemove" hidden>Remove picture</button>
-      </div>
-      <p class="status" id="artStatus" role="status"></p>
-    </div>
-
     <div class="verdict">
       <p id="resBlurb"></p>
       <p><b>Your weakness:</b> <span id="resFlaw"></span></p>
     </div>
+
+    <section aria-labelledby="cardTitle" class="block cardsec">
+      <h3 class="label" id="cardTitle"><small lang="ja">カード</small>Your trading card</h3>
+      <div class="cardgrid">
+        <div class="cardwrap" id="cardWrap"><img id="cardImg" alt="" width="750" height="1050"></div>
+        <div class="cardside">
+          <label class="note" for="holderInput">Card holder name</label>
+          <input id="holderInput" type="text" maxlength="28" placeholder="Your name or handle">
+          <div class="card-actions">
+            <button class="btn primary" type="button" id="cardShare">Share card</button>
+            <button class="btn" type="button" id="cardDownload">Download card</button>
+            <button class="btn" type="button" id="cardLink">Copy result link</button>
+          </div>
+          <p class="note" style="margin:0">Result code: <code id="resCode"></code></p>
+          <p class="note" style="margin:0">The link rebuilds this exact result on any device, so it doubles as your backup.</p>
+          <p class="status" id="cardStatus" role="status"></p>
+        </div>
+      </div>
+    </section>
 
     <div class="pool inline" role="group" aria-labelledby="poolLabel2">
       <p id="poolLabel2">Show matches from</p>
@@ -631,7 +690,6 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
       <h3 class="label" id="webTitle"><small lang="ja">相関図</small>Your web</h3>
       <div class="web" id="web"></div>
       <div class="others" id="others"></div>
-      <p class="status" id="castStatus" role="status"></p>
     </section>
 
     <section aria-labelledby="alignTitle" class="block">
@@ -649,7 +707,7 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
       </div>
     </section>
     <div class="actions">
-      <button class="btn primary" id="copyBtn" type="button">Copy my result</button>
+      <button class="btn" id="copyBtn" type="button">Copy result as text</button>
       <button class="btn" id="againBtn" type="button">Back to the cover</button>
     </div>
     <p class="status" id="status" role="status"></p>

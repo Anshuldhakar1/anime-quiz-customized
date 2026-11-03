@@ -14,9 +14,19 @@ Everything runs in the browser. No build step, no server.
 
 ## Character portraits
 
-When the site is online, it asks [AniList](https://anilist.co)'s public API for each character's profile picture and shows it directly from AniList's servers, with a credit link back to the character's AniList page. Nothing is copied into this repository. A portrait is only used when the character's series matches, and if AniList can't be reached the quiz falls back to its generated splash art. Lookups are cached in the visitor's browser.
+Portraits are looked up while the page runs and shown straight from the source site, with a credit link. Nothing is copied into this repository.
 
-Players can also add their own picture for any character (paste, choose a file, or drag and drop). Those pictures stay in their own browser.
+1. [AniList](https://anilist.co) public API, batched, and only accepted when the character's series matches.
+2. Fail-safe: [MyAnimeList](https://myanimelist.net) through the public [Jikan](https://jikan.moe) API, used when AniList has no picture, has only its placeholder, or the image fails to load.
+3. Otherwise, the quiz's own generated splash art.
+
+Lookups are cached in the visitor's browser.
+
+## History, result codes and trading cards
+
+- **Past results** are saved in the visitor's browser and listed on the home page.
+- **Result codes** (and `#r=` links) encode the story version, the character filter and every answer, so the same code rebuilds the same result on any device. They work as share links and as backups, with no account or server.
+- **Trading card**: each result is drawn as a collectible card (portrait, type, tier, sync rate, graded battle stats, ending, catchphrase, holder name and serial number) that can be shared, downloaded as a PNG, or linked.
 
 ## GitHub Pages
 

@@ -123,7 +123,7 @@ function drawSplash(cv, c, T, fw, fh) {
     a += wdt + .05 + R() * .12;
   }
 
-  var art = getArt(c.name);
+  var art = null;
   if (art) {
     var sc0 = Math.max(W / art.naturalWidth, H / art.naturalHeight);
     var iw = art.naturalWidth * sc0, ih = art.naturalHeight * sc0;
@@ -154,7 +154,7 @@ function drawSplash(cv, c, T, fw, fh) {
 
   /* emblem, sitting in front of the orb */
   var s = or * .95, lw = Math.max(2.5, M * .011), off = Math.max(3, M * .014);
-  var E = fw || !(current && current.portrait && current.c === c) ? T.emblem : "none";
+  var E = current && current.portrait && current.c === c ? "none" : T.emblem;
   if (E === "heart" || E === "crackheart" || E === "dripheart") {
     var hc = E === "dripheart" ? "#d81b4a" : E === "crackheart" ? mix(c.spot, "#ff3b6b", .35) : mix(c.spot, "#ff6f9c", .3);
     inked(x, function () { heartPath(x, ox, oy, s); }, hc, ink, lw, off);
@@ -539,59 +539,6 @@ function paintSplash() {
 }
 
 
-/* ================= Your own splash art =================
-   Pictures the viewer adds stay in their own browser (localStorage), keyed by character. */
-var ART_PREFIX = "anime-quiz-art:";
-var artStatusId = "artStatus";
-var artCache = {};
-function getArt(name) {
-  if (artCache[name] === undefined) {
-    artCache[name] = null;
-    var data = null;
-    try { data = localStorage.getItem(ART_PREFIX + name); } catch (e) {}
-    if (data) loadArt(name, data, false);
-  }
-  return artCache[name] && artCache[name].complete && artCache[name].naturalWidth ? artCache[name] : null;
-}
-function loadArt(name, dataURL, persist) {
-  var img = new Image();
-  img.onload = function () {
-    artCache[name] = img;
-    Object.keys(thumbCache).forEach(function (k) { if (k.indexOf(name + "|") === 0) delete thumbCache[k]; });
-    if (persist) {
-      try { localStorage.setItem(ART_PREFIX + name, dataURL); }
-      catch (e) { if ($(artStatusId)) $(artStatusId).textContent = "Added. Your browser is out of space to save it, so it will only last until you close this page."; }
-    }
-    if (!$("resultView").hidden && lastPicks) renderResult(false);
-  };
-  img.src = dataURL;
-}
-function removeArt(name) {
-  delete artCache[name];
-  artCache[name] = null;
-  try { localStorage.removeItem(ART_PREFIX + name); } catch (e) {}
-  Object.keys(thumbCache).forEach(function (k) { if (k.indexOf(name + "|") === 0) delete thumbCache[k]; });
-  if (!$("resultView").hidden && lastPicks) renderResult(false);
-}
-/* Shrink the picture so it saves quickly and fits in browser storage. */
-function useImageFile(file, name) {
-  if (!file || !/^image\//.test(file.type)) { $(artStatusId).textContent = "That isn't an image. Copy a picture, or choose a JPG, PNG or WebP file."; return; }
-  var url = URL.createObjectURL(file), img = new Image();
-  img.onload = function () {
-    var max = 1100, k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
-    var cv = document.createElement("canvas");
-    cv.width = Math.round(img.naturalWidth * k); cv.height = Math.round(img.naturalHeight * k);
-    cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
-    URL.revokeObjectURL(url);
-    var data;
-    try { data = cv.toDataURL("image/jpeg", .82); } catch (e) { $(artStatusId).textContent = "That picture couldn't be read. Try saving it to your device and choosing the file."; return; }
-    $(artStatusId).textContent = "Splash art added for " + name + ".";
-    loadArt(name, data, true);
-  };
-  img.onerror = function () { URL.revokeObjectURL(url); $(artStatusId).textContent = "That picture couldn't be opened. Try a JPG or PNG."; };
-  img.src = url;
-}
-
 /* ================= After-show analysis ================= */
 var CHEM = {
   tsun: ["dere", "They're patient enough to wait out the tsun.", "sado", "They know exactly which buttons to push."],
@@ -670,37 +617,45 @@ function renderAnalysis(w, picksUsed, me, order) {
 
 }
 
-/* ================= Official portraits (GitHub Pages build) =================
-   Asks AniList's public API for each character's profile picture. Images are shown straight
-   from AniList's servers with a credit link; nothing is copied into this site. If the API
-   can't be reached, the generated splash art is used instead. */
-var PORTRAIT_KEY = "anime-quiz-portraits-v1";
+/* ================= Official portraits =================
+   1. AniList's public API (batched, series-checked).
+   2. Fail-safe: MyAnimeList via the public Jikan API, one request at a time.
+   3. Otherwise the generated splash art.
+   Images are shown straight from those sites with a credit link; nothing is copied here.
+   Results are cached per browser; a picture that fails to load moves on to the next source. */
+var PORTRAIT_KEY = "anime-quiz-portraits-v2";
 var portraits = {};
-var portraitPending = {}, portraitOff = !PORTRAITS_ONLINE;
+var aniPending = {}, aniOff = !PORTRAITS_ONLINE, malOff = !PORTRAITS_ONLINE;
+var malQueue = [], malBusy = false, malTried = {};
 try { portraits = JSON.parse(localStorage.getItem(PORTRAIT_KEY)) || {}; } catch (e) { portraits = {}; }
 function savePortraits() { try { localStorage.setItem(PORTRAIT_KEY, JSON.stringify(portraits)); } catch (e) {} }
 
-function slug(s) { return String(s).toLowerCase().normalize("NFKD").replace(/[^a-z0-9]/g, ""); }
+function slug(s) { return String(s || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]/g, ""); }
 function seriesMatch(series, titles) {
   var want = slug(series).slice(0, 7);
-  return titles.some(function (t) { var s = slug(t || ""); return s && (s.indexOf(want) >= 0 || want.indexOf(s.slice(0, 7)) >= 0); });
+  return titles.some(function (t) { var s = slug(t); return s && (s.indexOf(want) >= 0 || want.indexOf(s.slice(0, 7)) >= 0); });
 }
-var SEARCH_AS = { "L": "L Lawliet", "Louise": "Louise Francoise", "Goku": "Son Goku", "Takagi": "Takagi", "Ram": "Ram", "Rem": "Rem", "Power": "Power", "Kamina": "Kamina", "Holo": "Holo", "Aqua": "Aqua", "Frieza": "Frieza", "Dio Brando": "Dio Brando" };
+var SEARCH_AS = { "L": "L Lawliet", "Louise": "Louise Francoise", "Goku": "Son Goku" };
 
 function portraitOf(c) { var p = portraits[c.name]; return p && p.img ? p : null; }
-function avatarURL(c, size) {
-  if (getArt(c.name)) return thumbURL(c, size);
-  var p = portraitOf(c);
-  return p ? p.img : thumbURL(c, size);
+function avatarURL(c, size) { var p = portraitOf(c); return p ? p.img : thumbURL(c, size); }
+
+var refreshTimer = null;
+function refreshSoon() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(function () {
+    if (!$("resultView").hidden && lastPicks) renderResult(false);
+    if (!$("coverView").hidden) renderHistory();
+  }, 80);
 }
 
-var portraitTimer = null;
+/* Step 1: AniList, up to 12 characters per request. */
 function ensurePortraits(list) {
-  if (portraitOff) return;
-  var need = list.filter(function (c) { return c && portraits[c.name] === undefined && !portraitPending[c.name]; });
+  var need = list.filter(function (c) { return c && portraits[c.name] === undefined && !aniPending[c.name] && !malTried[c.name]; });
   if (!need.length) return;
+  if (aniOff) { need.forEach(queueMal); return; }
   need = need.slice(0, 12);
-  need.forEach(function (c) { portraitPending[c.name] = true; });
+  need.forEach(function (c) { aniPending[c.name] = true; });
   var fields = "{ name { full } siteUrl image { large } media(perPage: 4, sort: POPULARITY_DESC) { nodes { title { romaji english } } } }";
   var query = "query {" + need.map(function (c, i) {
     return " a" + i + ": Page(perPage: 6) { characters(search: " + JSON.stringify(SEARCH_AS[c.name] || c.name) + ") " + fields + " }";
@@ -710,42 +665,335 @@ function ensurePortraits(list) {
     headers: { "Content-Type": "application/json", "Accept": "application/json" },
     body: JSON.stringify({ query: query })
   }).then(function (r) {
-    if (r.status === 429) { throw new Error("rate"); }
+    if (r.status === 429) throw new Error("rate");
     return r.json();
   }).then(function (j) {
     need.forEach(function (c, i) {
-      delete portraitPending[c.name];
+      delete aniPending[c.name];
       var page = j && j.data && j.data["a" + i], hits = page && page.characters || [];
       var pick = hits.filter(function (h) {
         var titles = (h.media && h.media.nodes || []).reduce(function (a, n) { return a.concat([n.title.romaji, n.title.english]); }, []);
         return seriesMatch(c.series, titles);
       })[0];
-      portraits[c.name] = pick && pick.image && pick.image.large ? { img: pick.image.large, site: pick.siteUrl } : null;
+      var img = pick && pick.image && pick.image.large;
+      if (img && !/\/default\.(jpg|png)/.test(img)) portraits[c.name] = { img: img, site: pick.siteUrl, src: "AniList" };
+      else queueMal(c);
     });
     savePortraits();
-    clearTimeout(portraitTimer);
-    portraitTimer = setTimeout(function () { if (!$("resultView").hidden && lastPicks) renderResult(false); }, 60);
+    refreshSoon();
   }).catch(function (err) {
-    need.forEach(function (c) { delete portraitPending[c.name]; });
-    if (!err || err.message !== "rate") portraitOff = true;
+    need.forEach(function (c) { delete aniPending[c.name]; });
+    if (!err || err.message !== "rate") aniOff = true;
+    need.forEach(queueMal);
+  });
+}
+
+/* Step 2: MyAnimeList through Jikan, spaced out to respect its rate limit. */
+function queueMal(c) {
+  if (malTried[c.name] || malOff) { if (portraits[c.name] === undefined) portraits[c.name] = null; return; }
+  malTried[c.name] = true;
+  malQueue.push(c);
+  pumpMal();
+}
+function pumpMal() {
+  if (malBusy || !malQueue.length) return;
+  malBusy = true;
+  var c = malQueue.shift();
+  fetch("https://api.jikan.moe/v4/characters?limit=8&order_by=favorites&sort=desc&q=" + encodeURIComponent(c.name))
+    .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+    .then(function (j) {
+      var jp = slug(c.jp), want = c.name.split(/\s+/).map(slug).filter(function (t) { return t.length > 1; });
+      var hit = (j.data || []).filter(function (d) {
+        var img = d.images && d.images.jpg && d.images.jpg.image_url;
+        if (!img || /questionmark/.test(img)) return false;
+        var kanji = slug((d.name_kanji || "").replace(/\s/g, ""));
+        var nm = slug(d.name) + slug((d.nicknames || []).join(""));
+        return (jp && kanji && kanji === jp) || want.every(function (t) { return nm.indexOf(t) >= 0; });
+      })[0];
+      portraits[c.name] = hit ? { img: (hit.images.webp && hit.images.webp.image_url) || hit.images.jpg.image_url, site: hit.url, src: "MyAnimeList" } : null;
+      savePortraits();
+      refreshSoon();
+    })
+    .catch(function (e) {
+      if (portraits[c.name] === undefined) portraits[c.name] = null;
+      if (e && e.message !== "429") malOff = true;
+      else { malTried[c.name] = false; }
+    })
+    .then(function () { setTimeout(function () { malBusy = false; pumpMal(); }, 450); });
+}
+
+/* A picture that won't load: try the next source, then give up on it for this session. */
+function portraitBroken(name) {
+  var c = CHARACTERS.filter(function (x) { return x.name === name; })[0], p = portraits[name];
+  if (!c || !p) return;
+  portraits[name] = undefined;
+  delete portraits[name];
+  if (p.src === "AniList") queueMal(c); else portraits[name] = null;
+  savePortraits();
+  refreshSoon();
+}
+function watchImages(root) {
+  root.querySelectorAll("img[data-pname], image[data-pname]").forEach(function (im) {
+    if (im._watched) return;
+    im._watched = true;
+    im.addEventListener("error", function () { portraitBroken(im.getAttribute("data-pname")); });
   });
 }
 
 function showPortrait(me) {
-  var p = getArt(me.name) ? null : portraitOf(me), img = $("resPortrait"), credit = $("resCredit");
+  var p = portraitOf(me), img = $("resPortrait"), credit = $("resCredit");
   current.portrait = !!p;
   if (p) {
-    if (img.getAttribute("src") !== p.img) img.src = p.img;
+    if (img.getAttribute("src") !== p.img) { img.src = p.img; img._watched = false; }
+    img.setAttribute("data-pname", me.name);
     img.alt = "Official portrait of " + me.name;
     img.hidden = false;
-    credit.innerHTML = 'Portrait from <a href="' + esc(p.site) + '" target="_blank" rel="noopener">AniList</a>';
+    credit.innerHTML = 'Portrait from <a href="' + esc(p.site) + '" target="_blank" rel="noopener">' + esc(p.src) + "</a>";
     credit.hidden = false;
     $("resPics").href = p.site;
+    $("resPics").textContent = me.name + " on " + p.src;
   } else {
     img.hidden = true; img.removeAttribute("src");
     credit.hidden = true;
   }
+  watchImages($("reveal"));
 }
+
+/* ================= Saved history and result codes =================
+   A result code holds the story version, the character filter and every answer
+   (one character per chapter). The same code rebuilds the same result on any device,
+   so it works as a share link and as a backup, with no account or server.
+   History is kept in this browser's localStorage. */
+var HIST_KEY = "anime-quiz-history-v1", CODE_VER = "5", HIST_MAX = 40;
+var POOL_CODE = { any: "a", M: "m", F: "f" }, CODE_POOL = { a: "any", m: "M", f: "F" };
+
+function encodeResult(p, poolKey) {
+  return CODE_VER + (POOL_CODE[poolKey] || "a") + p.map(function (n) { return n.toString(36); }).join("");
+}
+function decodeResult(raw) {
+  var code = String(raw || "").trim();
+  var m = code.match(/r=([0-9a-z]+)/i);
+  if (m) code = m[1];
+  code = code.toLowerCase();
+  if (code[0] !== CODE_VER || !CODE_POOL[code[1]]) return null;
+  var digits = code.slice(2);
+  if (digits.length !== SLOTS.length) return null;
+  var p = digits.split("").map(function (ch) { return parseInt(ch, 36); });
+  for (var i = 0; i < p.length; i++) {
+    var q = walk(p, i).shown[i];
+    if (!q || isNaN(p[i]) || p[i] >= q.a.length) return null;
+  }
+  return { picks: p, pool: CODE_POOL[code[1]] };
+}
+function resultLink(code) { return location.origin + location.pathname + "#r=" + code; }
+
+function loadHistory() {
+  try { var h = JSON.parse(localStorage.getItem(HIST_KEY)); return Array.isArray(h) ? h : []; } catch (e) { return []; }
+}
+function saveHistory(list) {
+  try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); return true; } catch (e) { return false; }
+}
+function addHistory(entry) {
+  var list = loadHistory().filter(function (e) { return e.code !== entry.code; });
+  list.unshift(entry);
+  saveHistory(list);
+}
+function charByName(n) { return CHARACTERS.filter(function (c) { return c.name === n; })[0]; }
+
+function renderHistory() {
+  var list = loadHistory(), box = $("historyBox"), ul = $("histList");
+  box.hidden = !list.length;
+  if (!list.length) { ul.textContent = ""; return; }
+  ensurePortraits(list.slice(0, 12).map(function (e) { return charByName(e.name); }).filter(Boolean));
+  ul.innerHTML = list.map(function (e, i) {
+    var c = charByName(e.name), T = TYPES[e.type] || { name: "" };
+    var url = c ? avatarURL(c, 120) : "";
+    var d = new Date(e.date), when = isNaN(d) ? "" : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+    return '<li class="hist" style="--hc:' + esc(e.spot || "#ff5ca8") + '">' +
+      '<button type="button" class="hist-open" data-code="' + esc(e.code) + '">' +
+      (url ? '<img src="' + url + '" alt="" width="56" height="56"' + (c && portraitOf(c) ? ' data-pname="' + esc(c.name) + '"' : "") + ' referrerpolicy="no-referrer">' : "") +
+      "<span><b>" + esc(e.name) + "</b><small>" + esc(T.name) + " · " + esc(e.tier || "") + " " + (e.sync || "") + "%</small><small>" + esc(when) + (e.pool && e.pool !== "any" ? " · " + esc(POOLS[e.pool].label) : "") + "</small></span></button>" +
+      '<button type="button" class="hist-del" data-del="' + i + '" aria-label="Remove ' + esc(e.name) + ' from history">×</button></li>';
+  }).join("");
+  watchImages(ul);
+}
+
+/* ================= Trading card =================
+   A 750 x 1050 collectible card drawn on canvas: portrait (or generated art), type, tier,
+   sync rate, battle stats with grades, ending, catchphrase, holder name and serial. */
+var HOLDER_KEY = "anime-quiz-holder";
+var cardState = null, cardURL = "", cardBlob = null, cardTimer = null;
+var DISPLAY = '"Dela Gothic One", Impact, sans-serif', BODY = '"Zen Kaku Gothic New", system-ui, sans-serif';
+
+function rrect(x, X, Y, W, H, r) {
+  x.beginPath(); x.moveTo(X + r, Y); x.arcTo(X + W, Y, X + W, Y + H, r); x.arcTo(X + W, Y + H, X, Y + H, r);
+  x.arcTo(X, Y + H, X, Y, r); x.arcTo(X, Y, X + W, Y, r); x.closePath();
+}
+function fitFont(x, text, family, weight, max, width) {
+  var size = max;
+  do { x.font = weight + " " + size + "px " + family; size -= 2; } while (x.measureText(text).width > width && size > 14);
+  return size + 2;
+}
+function wrapLines(x, text, width, maxLines) {
+  var words = text.split(" "), lines = [], line = "";
+  words.forEach(function (w) {
+    var t = line ? line + " " + w : w;
+    if (x.measureText(t).width > width && line) { lines.push(line); line = w; } else line = t;
+  });
+  if (line) lines.push(line);
+  if (lines.length > maxLines) { lines = lines.slice(0, maxLines); lines[maxLines - 1] = lines[maxLines - 1].replace(/\s+\S*$/, "") + "…"; }
+  return lines;
+}
+
+function drawCard(cv, S, portrait) {
+  var W = 750, H = 1050, x = cv.getContext("2d");
+  cv.width = W; cv.height = H;
+  var c = S.me, T = S.T, spot = c.spot, ink = "#101218", paper = "#fffaf2";
+  var light = mix(spot, "#ffffff", .55), deep = mix(spot, "#000000", .35);
+
+  /* body and foil */
+  x.fillStyle = ink; rrect(x, 0, 0, W, H, 34); x.fill();
+  var g = x.createLinearGradient(0, 0, W, H);
+  g.addColorStop(0, light); g.addColorStop(.45, spot); g.addColorStop(.7, mix(spot, "#ffe9a8", .35)); g.addColorStop(1, deep);
+  x.fillStyle = g; rrect(x, 16, 16, W - 32, H - 32, 24); x.fill();
+  x.save(); rrect(x, 16, 16, W - 32, H - 32, 24); x.clip();
+  x.globalAlpha = .09; x.fillStyle = "#ffffff";
+  for (var i = -H; i < W + H; i += 34) { x.beginPath(); x.moveTo(i, 0); x.lineTo(i + 14, 0); x.lineTo(i + 14 - H, H); x.lineTo(i - H, H); x.fill(); }
+  x.globalAlpha = 1; x.restore();
+
+  /* header */
+  x.fillStyle = paper; rrect(x, 36, 34, W - 72, 92, 14); x.fill();
+  x.lineWidth = 4; x.strokeStyle = ink; x.stroke();
+  x.fillStyle = ink; x.font = "700 17px " + BODY; x.textBaseline = "alphabetic";
+  x.fillText((ROLES[c.role] + " · " + T.name + " " + T.jp).toUpperCase(), 58, 64);
+  var ns = fitFont(x, c.name, DISPLAY, 400, 44, 470);
+  x.font = "400 " + ns + "px " + DISPLAY; x.fillText(c.name, 56, 110);
+  /* tier seal */
+  x.save(); x.translate(650, 80);
+  starPath(x, 0, 0, 62, 50, 16, 0); x.fillStyle = ink; x.fill();
+  x.beginPath(); x.arc(0, 0, 44, 0, 7); x.fillStyle = S.tier === "SSR" ? "#ffd23f" : S.tier === "SR" ? "#cfd6e6" : "#e6b48a"; x.fill();
+  x.fillStyle = ink; x.textAlign = "center"; x.font = "400 " + (S.tier.length > 2 ? 28 : 34) + "px " + DISPLAY; x.fillText(S.tier, 0, 9);
+  x.font = "700 13px " + BODY; x.fillText(S.sync + "% SYNC", 0, 30);
+  x.restore(); x.textAlign = "left";
+
+  /* art window */
+  var ax = 36, ay = 144, aw = W - 72, ah = 470;
+  var art = document.createElement("canvas");
+  var keep = current;
+  current = { c: c, portrait: !!portrait };
+  try { drawSplash(art, c, T, aw, ah); } catch (e) {}
+  current = keep;
+  x.save(); rrect(x, ax, ay, aw, ah, 10); x.clip();
+  x.drawImage(art, ax, ay, aw, ah);
+  if (portrait) {
+    var ph = ah - 50, pw = Math.min(aw * .6, ph * portrait.naturalWidth / portrait.naturalHeight), px = ax + (aw - pw) / 2, py = ay + 25;
+    x.fillStyle = ink; x.fillRect(px + 10, py + 10, pw, ph);
+    x.fillStyle = paper; x.fillRect(px - 6, py - 6, pw + 12, ph + 12);
+    var sc = Math.max(pw / portrait.naturalWidth, ph / portrait.naturalHeight);
+    var iw = portrait.naturalWidth * sc, ih = portrait.naturalHeight * sc;
+    x.save(); x.beginPath(); x.rect(px, py, pw, ph); x.clip();
+    x.drawImage(portrait, px + (pw - iw) / 2, py, iw, ih);
+    x.restore();
+    x.lineWidth = 4; x.strokeStyle = ink; x.strokeRect(px - 6, py - 6, pw + 12, ph + 12);
+  }
+  x.restore();
+  x.lineWidth = 6; x.strokeStyle = ink; rrect(x, ax, ay, aw, ah, 10); x.stroke();
+  /* vertical name tag */
+  x.save(); x.font = "400 26px " + DISPLAY; x.textAlign = "center";
+  var chars = Array.from(c.jp).slice(0, 12), tagH = chars.length * 28 + 20;
+  x.fillStyle = paper; x.fillRect(ax + aw - 58, ay + 16, 42, tagH); x.lineWidth = 3; x.strokeRect(ax + aw - 58, ay + 16, 42, tagH);
+  x.fillStyle = ink; chars.forEach(function (ch, k) { x.fillText(ch, ax + aw - 37, ay + 50 + k * 28); });
+  x.restore();
+
+  /* series strip */
+  x.fillStyle = ink; rrect(x, 36, 630, W - 72, 46, 10); x.fill();
+  x.fillStyle = paper; x.font = "700 19px " + BODY;
+  var series = "from " + c.series;
+  while (x.measureText(series).width > 470 && series.length > 10) series = series.slice(0, -2);
+  if (series !== "from " + c.series) series += "…";
+  x.fillText(series, 56, 660);
+  x.textAlign = "right"; x.fillStyle = "#ffd23f"; x.font = "400 20px " + DISPLAY;
+  x.fillText("PWR " + S.pw.toLocaleString("en-US"), W - 56, 661); x.textAlign = "left";
+
+  /* stats panel */
+  x.fillStyle = paper; rrect(x, 36, 690, W - 72, 210, 14); x.fill(); x.lineWidth = 4; x.strokeStyle = ink; x.stroke();
+  var cx = 150, cy = 795, R = 78, N = S.stats.length;
+  var pt = function (k, r) { var a = -Math.PI / 2 + k * Math.PI * 2 / N; return [cx + Math.cos(a) * r, cy + Math.sin(a) * r]; };
+  [1, .5].forEach(function (k) {
+    x.beginPath(); S.stats.forEach(function (_, j) { var p = pt(j, R * k); x[j ? "lineTo" : "moveTo"](p[0], p[1]); }); x.closePath();
+    x.strokeStyle = k === 1 ? ink : "rgba(16,18,24,.3)"; x.lineWidth = k === 1 ? 3 : 1.5; x.stroke();
+  });
+  x.beginPath(); S.stats.forEach(function (st, j) { var p = pt(j, R * Math.max(.1, Math.min(1, st[1] / 2))); x[j ? "lineTo" : "moveTo"](p[0], p[1]); }); x.closePath();
+  x.fillStyle = rgba(spot, .65); x.fill(); x.strokeStyle = ink; x.lineWidth = 3; x.stroke();
+  S.stats.forEach(function (st, j) {
+    var col = j < 4 ? 0 : 1, row = j % 4, sx = 280 + col * 215, sy = 728 + row * 44;
+    var gr = grade(st[1]);
+    x.fillStyle = ink; x.font = "700 18px " + BODY; x.fillText(st[0], sx, sy + 20);
+    x.fillStyle = gr === "S" ? spot : paper; x.fillRect(sx + 132, sy, 34, 30); x.lineWidth = 2.5; x.strokeStyle = ink; x.strokeRect(sx + 132, sy, 34, 30);
+    x.fillStyle = ink; x.textAlign = "center"; x.font = "400 20px " + DISPLAY; x.fillText(gr, sx + 149, sy + 23); x.textAlign = "left";
+  });
+
+  /* catchphrase */
+  x.fillStyle = paper; rrect(x, 36, 914, W - 72, 74, 37); x.fill(); x.lineWidth = 4; x.strokeStyle = ink; x.stroke();
+  x.fillStyle = ink; x.font = "700 18px " + BODY;
+  wrapLines(x, T.love, W - 150, 2).forEach(function (l, k, arr) { x.fillText(l, 70, 945 + k * 24 - (arr.length === 1 ? -10 : 0)); });
+
+  /* footer */
+  x.fillStyle = ink; x.font = "700 15px " + BODY;
+  x.fillText(("Holder: " + (S.holder || "Unknown hero")).toUpperCase().slice(0, 40), 40, 1022);
+  x.textAlign = "right"; x.fillText("No. " + S.serial + " · " + S.ending.toUpperCase(), W - 40, 1022); x.textAlign = "left";
+}
+
+function cardSerial(code) {
+  var h = 0; for (var i = 0; i < code.length; i++) h = (h * 31 + code.charCodeAt(i)) >>> 0;
+  return String(h % 10000).padStart(4, "0") + "/" + CHARACTERS.length;
+}
+
+function buildCard(S) {
+  cardState = S;
+  clearTimeout(cardTimer);
+  cardTimer = setTimeout(function () { paintCard(S); }, 60);
+}
+function paintCard(S) {
+  var cv = document.createElement("canvas"), p = portraitOf(S.me);
+  var finish = function (img) {
+    try {
+      drawCard(cv, S, img);
+      cardURL = cv.toDataURL("image/png");
+    } catch (e) {
+      drawCard(cv, S, null);
+      try { cardURL = cv.toDataURL("image/png"); } catch (e2) { cardURL = ""; }
+    }
+    if (cardState !== S) return;
+    $("cardImg").src = cardURL;
+    $("cardImg").alt = "Trading card: " + S.me.name + ", " + S.T.name + ", " + S.tier + ", " + S.sync + "% sync";
+    cardBlob = null;
+    if (cv.toBlob) try { cv.toBlob(function (b) { if (cardState === S) cardBlob = b; }, "image/png"); } catch (e) {}
+  };
+  if (!p) return finish(null);
+  var img = new Image();
+  img.crossOrigin = "anonymous";
+  img.referrerPolicy = "no-referrer";
+  img.onload = function () { finish(img); };
+  img.onerror = function () { finish(null); };
+  img.src = p.img + (p.img.indexOf("?") < 0 ? "?card" : "&card");
+}
+
+/* holographic tilt on the preview */
+(function () {
+  var wrap = $("cardWrap");
+  if (!wrap || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  wrap.addEventListener("pointermove", function (e) {
+    var r = wrap.getBoundingClientRect(), px = (e.clientX - r.left) / r.width, py = (e.clientY - r.top) / r.height;
+    wrap.style.setProperty("--rx", ((.5 - py) * 14).toFixed(2) + "deg");
+    wrap.style.setProperty("--ry", ((px - .5) * 18).toFixed(2) + "deg");
+    wrap.style.setProperty("--mx", (px * 100).toFixed(1) + "%");
+    wrap.style.setProperty("--my", (py * 100).toFixed(1) + "%");
+  });
+  wrap.addEventListener("pointerleave", function () {
+    wrap.style.setProperty("--rx", "0deg"); wrap.style.setProperty("--ry", "0deg");
+  });
+})();
 
 /* ================= Shared helpers ================= */
 var thumbCache = {};
@@ -984,7 +1232,11 @@ function drawWeb(me, links) {
     var g = svgEl("g", { class: "w-node" + (isMe ? " me" : "") });
     g.appendChild(svgEl("circle", { cx: x + 4, cy: y + 4, r: r, class: "w-shadow" }));
     var url = avatarURL(c, 160);
-    if (url) g.appendChild(svgEl("image", { href: url, x: x - r, y: y - r, width: r * 2, height: r * 2, "clip-path": "url(#" + id + ")", preserveAspectRatio: "xMidYMid slice" }));
+    if (url) {
+      var at = { href: url, x: x - r, y: y - r, width: r * 2, height: r * 2, "clip-path": "url(#" + id + ")", preserveAspectRatio: portraitOf(c) ? "xMidYMin slice" : "xMidYMid slice" };
+      if (portraitOf(c)) at["data-pname"] = c.name;
+      g.appendChild(svgEl("image", at));
+    }
     g.appendChild(svgEl("circle", { cx: x, cy: y, r: r, class: "w-ring" }));
     var ty = y + r + 16;
     if (label) g.appendChild(svgEl("text", { x: x, y: ty, "text-anchor": "middle", class: "w-rel" }, label));
@@ -1019,9 +1271,6 @@ function renderResult(fresh) {
   $("resMal").href = malURL(me);
   $("resMore").href = picsURL(me);
   $("resBlurb").textContent = me.blurb;
-  var hasArt = !!getArt(me.name);
-  $("artTitle").textContent = hasArt ? "Your splash art for " + me.name : "Make the splash art yours";
-  $("artRemove").hidden = !hasArt;
   $("resFlaw").textContent = me.flaw;
 
   /* character file */
@@ -1072,23 +1321,22 @@ function renderResult(fresh) {
   showPortrait(me);
   drawWeb(me, links);
 
+  watchImages($("web"));
   var box = $("others");
   box.textContent = "";
   links.forEach(function (l) {
     var c = l.c, d = document.createElement("article");
     d.className = "other";
     var url = avatarURL(c, 160);
-    d.innerHTML = (url ? '<img src="' + url + '" alt="" width="80" height="80">' : '<span class="noimg"></span>') +
+    d.innerHTML = (url ? '<img src="' + url + '" alt="" width="80" height="80"' + (portraitOf(c) ? ' data-pname="' + esc(c.name) + '"' : "") + ' referrerpolicy="no-referrer">' : '<span class="noimg"></span>') +
       '<div><small>' + esc(l.label) + "</small><strong>" + esc(c.name) + "</strong>" +
       '<span class="meta">' + esc(c.series) + " · " + esc(TYPES[c.type].name) + " · " + esc(ROLES[c.role]) + "</span>" +
       "<p>" + esc(c.who) + "</p>" +
-      '<div class="card-links"><a href="' + anilistURL(c) + '" target="_blank" rel="noopener">Official portrait</a>' +
-      '<label class="mini">' + (getArt(c.name) ? "Change picture" : "Add picture") + '<input type="file" accept="image/*" class="sr-only" data-art="' + esc(c.name) + '"></label>' +
-      '<button type="button" class="mini" data-paste="' + esc(c.name) + '">Paste copied image</button>' +
-      (getArt(c.name) ? '<button type="button" class="mini" data-unart="' + esc(c.name) + '">Remove</button>' : "") + "</div></div>";
+      '<div class="card-links"><a href="' + (portraitOf(c) ? portraitOf(c).site : anilistURL(c)) + '" target="_blank" rel="noopener">' + (portraitOf(c) ? "View on " + portraitOf(c).src : "Find on AniList") + "</a></div></div>";
     box.appendChild(d);
   });
 
+  watchImages(box);
   var counts = { P: 0, S: 0, V: 0 }, tcount = {};
   order.slice(0, 12).forEach(function (o) { counts[o.c.role]++; tcount[o.c.type] = (tcount[o.c.type] || 0) + 1; });
   $("splitBar").innerHTML = ["P", "S", "V"].map(function (r) {
@@ -1102,6 +1350,17 @@ function renderResult(fresh) {
   }).join("");
 
   lastShare = "I got " + me.name + " (" + T.name + ", " + ROLES[me.role].toLowerCase() + ", " + me.series + ") with a " + sync + "% sync rate on the Which Anime Character Are You? quiz. My crewmate is " + crew.name + " and my rival is " + rival.name + ".";
+  /* result code, history and trading card */
+  var code = encodeResult(lastPicks, pool);
+  lastCode = code;
+  $("resCode").textContent = code;
+  lastShare += " See my card: " + resultLink(code);
+  try { history.replaceState(null, "", "#r=" + code); } catch (e) {}
+  if (fresh && !openedFromSaved) addHistory({ code: code, name: me.name, type: me.type, series: me.series, sync: sync, tier: tier, spot: me.spot, pool: pool, date: new Date().toISOString() });
+  $("sharedBanner").hidden = !viewingShared;
+  buildCard({ me: me, T: T, sync: sync, tier: tier, stats: stats, pw: pw, ending: pickEnding(normTraits(w.tot))[0], holder: getHolder(), serial: cardSerial(code), code: code });
+  $("cardStatus").textContent = "";
+
   $("status").textContent = "";
   lastNarrow = $("web").clientWidth < 560;
   paintSplash();
@@ -1112,7 +1371,36 @@ function renderResult(fresh) {
   if (fresh) $("resName").focus({ preventScroll: true });
 }
 
+var viewingShared = false, openedFromSaved = false, lastCode = "";
+function getHolder() { try { return localStorage.getItem(HOLDER_KEY) || ""; } catch (e) { return ""; } }
+function clearHash() { try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {} }
+function openResult(p, poolKey, shared) {
+  viewingShared = !!shared;
+  openedFromSaved = true;
+  picks = p.slice();
+  setPool(poolKey);
+  renderResult(true);
+  openedFromSaved = false;
+}
+function openFromHash() {
+  var m = location.hash.match(/r=([0-9a-z]+)/i);
+  if (!m) return false;
+  var d = decodeResult(m[1]);
+  if (!d) return false;
+  var mine = loadHistory().some(function (e) { return e.code === m[1].toLowerCase(); });
+  openResult(d.picks, d.pool, !mine);
+  return true;
+}
+function goCover() {
+  document.documentElement.style.removeProperty("--spot");
+  viewingShared = false;
+  clearHash();
+  renderHistory();
+  show("coverView");
+}
 function begin() {
+  viewingShared = false;
+  clearHash();
   picks = []; index = 0; locked = false; current = null; clockAbs = null; clockIndex = -1;
   clearSave();
   show("chapterView");
@@ -1127,9 +1415,75 @@ document.querySelectorAll("[data-pool]").forEach(function (b) {
 });
 setPool(pool);
 $("startBtn").addEventListener("click", begin);
-$("againBtn").addEventListener("click", function () {
-  document.documentElement.style.removeProperty("--spot");
-  show("coverView");
+$("againBtn").addEventListener("click", goCover);
+$("sharedStart").addEventListener("click", begin);
+window.addEventListener("hashchange", function () { if (location.hash.indexOf("r=") >= 0 && "#r=" + lastCode !== location.hash) openFromHash(); });
+
+/* history list */
+$("histList").addEventListener("click", function (e) {
+  var del = e.target.closest("[data-del]"), open = e.target.closest("[data-code]");
+  if (del) {
+    var list = loadHistory(); list.splice(+del.getAttribute("data-del"), 1); saveHistory(list); renderHistory();
+    var first = $("histList").querySelector(".hist-open"); (first || $("startBtn")).focus();
+    return;
+  }
+  if (open) {
+    var d = decodeResult(open.getAttribute("data-code"));
+    if (d) openResult(d.picks, d.pool, false);
+  }
+});
+var clearArmed = false;
+$("histClear").addEventListener("click", function () {
+  if (!clearArmed) { clearArmed = true; $("histClear").textContent = "Tap again to clear all"; setTimeout(function () { clearArmed = false; $("histClear").textContent = "Clear history"; }, 4000); return; }
+  clearArmed = false; $("histClear").textContent = "Clear history";
+  saveHistory([]); renderHistory(); $("startBtn").focus();
+});
+$("codeForm").addEventListener("submit", function (e) {
+  e.preventDefault();
+  var raw = $("codeInput").value, d = decodeResult(raw);
+  if (!d) { $("codeStatus").textContent = "That code doesn't match this version of the quiz. Check it was copied in full."; return; }
+  $("codeStatus").textContent = "";
+  var code = encodeResult(d.picks, d.pool);
+  var mine = loadHistory().some(function (h) { return h.code === code; });
+  openedFromSaved = mine;
+  viewingShared = false;
+  picks = d.picks.slice(); setPool(d.pool);
+  renderResult(true);
+  openedFromSaved = false;
+});
+
+/* trading card actions */
+(function () { try { $("holderInput").value = getHolder(); } catch (e) {} })();
+$("holderInput").addEventListener("input", function () {
+  var v = $("holderInput").value.trim();
+  try { localStorage.setItem(HOLDER_KEY, v); } catch (e) {}
+  if (cardState) buildCard(Object.assign({}, cardState, { holder: v }));
+});
+function cardFileName() { return (cardState ? cardState.me.name : "anime") .replace(/[^a-z0-9]+/gi, "-").toLowerCase() + "-card.png"; }
+$("cardDownload").addEventListener("click", function () {
+  if (!cardURL) { $("cardStatus").textContent = "The card is still being drawn. Try again in a second."; return; }
+  var a = document.createElement("a");
+  a.href = cardURL; a.download = cardFileName();
+  document.body.appendChild(a); a.click(); a.remove();
+  $("cardStatus").textContent = "Card saved as " + cardFileName() + ".";
+});
+function copyText(text, done) {
+  var fail = function () { $("cardStatus").textContent = text; };
+  if (!navigator.clipboard) return fail();
+  navigator.clipboard.writeText(text).then(function () { $("cardStatus").textContent = done; }, fail);
+}
+$("cardLink").addEventListener("click", function () { copyText(resultLink(lastCode), "Link copied. Anyone who opens it sees this exact result."); });
+$("cardShare").addEventListener("click", function () {
+  var link = resultLink(lastCode), title = "I'm " + (cardState ? cardState.me.name : "") + "!";
+  var text = lastShare;
+  if (cardBlob && navigator.canShare) {
+    var file = new File([cardBlob], cardFileName(), { type: "image/png" });
+    if (navigator.canShare({ files: [file] })) {
+      return navigator.share({ files: [file], title: title, text: text }).then(function () { $("cardStatus").textContent = "Shared."; }, function () {});
+    }
+  }
+  if (navigator.share) return navigator.share({ title: title, text: text, url: link }).then(function () { $("cardStatus").textContent = "Shared."; }, function () {});
+  copyText(text, "Your browser can't share files, so the result and link are copied. Download the card to post the image.");
 });
 $("resumeBtn").addEventListener("click", function () {
   var s = loadSave();
@@ -1147,76 +1501,6 @@ $("copyBtn").addEventListener("click", function () {
   navigator.clipboard.writeText(lastShare).then(function () {
     $("status").textContent = "Copied. Paste it to your friends.";
   }, fallback);
-});
-$("artFile").addEventListener("change", function (e) {
-  artStatusId = "artStatus";
-  if (current && e.target.files[0]) useImageFile(e.target.files[0], current.c.name);
-  e.target.value = "";
-});
-$("artRemove").addEventListener("click", function () {
-  if (!current) return;
-  artStatusId = "artStatus";
-  removeArt(current.c.name);
-  $("artStatus").textContent = "Picture removed. Back to the generated art.";
-});
-document.addEventListener("paste", function (e) {
-  if ($("resultView").hidden || !current) return;
-  var items = (e.clipboardData && e.clipboardData.items) || [];
-  for (var i = 0; i < items.length; i++) {
-    if (items[i].type.indexOf("image/") === 0) {
-      e.preventDefault();
-      artStatusId = pasteTarget ? "castStatus" : "artStatus";
-      useImageFile(items[i].getAsFile(), pasteTarget || current.c.name);
-      pasteTarget = null;
-      return;
-    }
-  }
-  $("artStatus").textContent = "No picture found on your clipboard. Right-click an image and choose Copy image, then paste again.";
-});
-$("artPaste").addEventListener("click", function () {
-  if (!current) return;
-  artStatusId = "artStatus"; pasteTarget = null;
-  var name = current.c.name;
-  var hint = function () { $("artStatus").textContent = "Your browser blocked reading the clipboard from this button. Press Ctrl+V (Cmd+V on Mac) anywhere on the page instead, or on a phone, choose the picture as a file."; };
-  if (!navigator.clipboard || !navigator.clipboard.read) return hint();
-  navigator.clipboard.read().then(function (list) {
-    for (var i = 0; i < list.length; i++) {
-      var t = list[i].types.filter(function (ty) { return ty.indexOf("image/") === 0; })[0];
-      if (t) return list[i].getType(t).then(function (blob) { useImageFile(blob, name); });
-    }
-    $("artStatus").textContent = "No picture found on your clipboard. Copy an image first.";
-  }, hint);
-});
-var box0 = $("artBox");
-["dragenter", "dragover"].forEach(function (ev) { box0.addEventListener(ev, function (e) { e.preventDefault(); box0.classList.add("drag"); }); });
-["dragleave", "drop"].forEach(function (ev) { box0.addEventListener(ev, function (e) { e.preventDefault(); box0.classList.remove("drag"); }); });
-box0.addEventListener("drop", function (e) {
-  var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-  if (f && current) useImageFile(f, current.c.name);
-});
-var pasteTarget = null;
-$("others").addEventListener("change", function (e) {
-  var name = e.target.getAttribute && e.target.getAttribute("data-art");
-  if (!name || !e.target.files[0]) return;
-  artStatusId = "castStatus";
-  useImageFile(e.target.files[0], name);
-});
-$("others").addEventListener("click", function (e) {
-  var t = e.target.closest ? e.target.closest("[data-paste],[data-unart]") : null;
-  if (!t) return;
-  artStatusId = "castStatus";
-  if (t.hasAttribute("data-unart")) { removeArt(t.getAttribute("data-unart")); $("castStatus").textContent = "Picture removed."; return; }
-  var name = t.getAttribute("data-paste");
-  pasteTarget = name;
-  var hint = function () { $("castStatus").textContent = "Ready for " + name + ". Press Ctrl+V (Cmd+V on Mac) to paste the copied image, or use Add picture."; };
-  if (!navigator.clipboard || !navigator.clipboard.read) return hint();
-  navigator.clipboard.read().then(function (list) {
-    for (var i = 0; i < list.length; i++) {
-      var ty = list[i].types.filter(function (x) { return x.indexOf("image/") === 0; })[0];
-      if (ty) { pasteTarget = null; return list[i].getType(ty).then(function (blob) { useImageFile(blob, name); }); }
-    }
-    hint();
-  }, hint);
 });
 var resizeTimer, lastNarrow = null;
 window.addEventListener("resize", function () {
@@ -1253,4 +1537,6 @@ if (saved) {
   $("resumeBtn").hidden = false;
   $("resumeBtn").textContent = "Continue from chapter " + (saved.index + 1);
 }
+renderHistory();
 drawBurst();
+openFromHash();

@@ -429,18 +429,20 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
 /* Trading card */
 .cardgrid { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 24px; align-items: start; }
 .cardwrap { --rx: 0deg; --ry: 0deg; --mx: 50%; --my: 50%; position: relative; perspective: 900px; max-width: 340px; width: 100%; }
-.cardwrap img { display: block; width: 100%; height: auto; border-radius: 16px; transform: rotateX(var(--rx)) rotateY(var(--ry)); transition: transform .15s ease-out; box-shadow: 8px 10px 0 var(--ink); background: var(--ink); aspect-ratio: 750 / 1050; }
+.cardstack { display: grid; gap: 12px; justify-items: center; }
+.cardwrap .flip { width: 100%; transform: rotateX(var(--rx)) rotateY(var(--ry)); transition: transform .15s ease-out; transform-style: preserve-3d; cursor: pointer; }
 .cardwrap::after {
   content: ""; position: absolute; inset: 0; border-radius: 16px; pointer-events: none; mix-blend-mode: overlay;
   background: radial-gradient(circle at var(--mx) var(--my), rgba(255,255,255,.55), rgba(255,255,255,0) 45%), linear-gradient(115deg, rgba(255,0,170,.18), rgba(0,220,255,.18), rgba(255,240,0,.18));
   transform: rotateX(var(--rx)) rotateY(var(--ry));
+  z-index: 1;
 }
 .cardside { display: grid; gap: 10px; min-width: 0; }
 .card-actions { display: flex; flex-wrap: wrap; gap: 12px; }
 .card-actions .btn { min-height: 46px; padding: 8px 18px; font-size: var(--step--1); }
 .cardside code { font: 700 var(--step--1)/1.3 ui-monospace, "SFMono-Regular", Menlo, monospace; color: var(--ink); overflow-wrap: anywhere; }
 @media (max-width: 620px) { .cardgrid { grid-template-columns: 1fr; } .cardwrap { justify-self: center; } }
-@media (prefers-reduced-motion: reduce) { .cardwrap img { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .cardwrap .flip { transition: none; } }
 
 
 /* Card viewer (history) */
@@ -643,7 +645,14 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
     <section aria-labelledby="cardTitle" class="block cardsec">
       <h3 class="label" id="cardTitle"><small lang="ja">カード</small>Your trading card</h3>
       <div class="cardgrid">
-        <div class="cardwrap" id="cardWrap"><img id="cardImg" alt="" width="750" height="1050"></div>
+        <div class="cardstack">
+          <div class="cardwrap" id="cardWrap">
+            <div class="flip" id="cardFlip" aria-label="Your trading card. Press Flip card to see the other side.">
+              <div class="flip-inner"><img id="cardImg" class="face front" alt="" width="750" height="1050"><img id="cardBackImg" class="face back" alt="" width="750" height="1050"></div>
+            </div>
+          </div>
+          <button class="btn" type="button" id="cardFlipBtn">Flip card</button>
+        </div>
         <div class="cardside">
           <label class="note" for="holderInput">Card holder name</label>
           <input id="holderInput" type="text" maxlength="28" placeholder="Your name or handle">
@@ -653,7 +662,7 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
             <button class="btn" type="button" id="cardLink">Copy result link</button>
           </div>
           <p class="note" style="margin:0">Card ID: <code id="resCode"></code></p>
-          <p class="note" style="margin:0">Type this ID on the home page of any device, or open the link, to get this exact card back. The back of the card is waiting in your history.</p>
+          <p class="note" style="margin:0">Type this ID on the home page of any device, or open the link, to get this exact card back. Flip the card to see the back. It is also kept in your history.</p>
           <p class="status" id="cardStatus" role="status"></p>
         </div>
       </div>

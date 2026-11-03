@@ -442,6 +442,22 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
 @media (max-width: 620px) { .cardgrid { grid-template-columns: 1fr; } .cardwrap { justify-self: center; } }
 @media (prefers-reduced-motion: reduce) { .cardwrap img { transition: none; } }
 
+
+/* Card viewer (history) */
+.carddlg { border: 4px solid var(--ink); padding: 0; background: var(--paper); color: var(--ink); max-width: min(560px, calc(100vw - 24px)); width: 100%; box-shadow: 10px 10px 0 var(--ink); }
+.carddlg::backdrop { background: rgba(8, 4, 14, .72); }
+.dlg-inner { display: grid; gap: 14px; padding: 18px; justify-items: center; }
+.dlg-inner .label { justify-self: start; }
+.flip { perspective: 1400px; width: min(360px, 78vw); cursor: pointer; }
+.flip-inner { position: relative; transition: transform .7s cubic-bezier(.3, .7, .3, 1); transform-style: preserve-3d; aspect-ratio: 750 / 1050; }
+.flip.flipped .flip-inner { transform: rotateY(180deg); }
+.face { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 16px; backface-visibility: hidden; -webkit-backface-visibility: hidden; background: #0b0614; box-shadow: 6px 8px 0 var(--ink); }
+.face.back { transform: rotateY(180deg); }
+.dlg-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+.dlg-actions .btn { min-height: 46px; padding: 8px 16px; font-size: var(--step--1); }
+.dlg-inner code, .hist-open code { font: 700 var(--step--1)/1.3 ui-monospace, "SFMono-Regular", Menlo, monospace; color: var(--ink); }
+@media (prefers-reduced-motion: reduce) { .flip-inner { transition: none; } }
+
 /* Character file */
 .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
 .fact { border: 3px solid var(--ink); padding: 12px 14px; min-width: 0; display: grid; gap: 4px; align-content: start; }
@@ -555,12 +571,12 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
         <button type="button" class="mini" id="histClear">Clear history</button>
       </div>
       <ul class="hist-list" id="histList"></ul>
-      <p class="note" style="margin:0">Saved in this browser. To keep a result on another device, open it and copy its result link.</p>
+      <p class="note" style="margin:0">Saved in this browser. Tap a card to see its back. To move a card to another device, type its ID there.</p>
     </section>
     <form class="codebox" id="codeForm" autocomplete="off">
-      <label for="codeInput">Have a result code or link?</label>
+      <label for="codeInput">Have a card ID?</label>
       <div class="code-row">
-        <input id="codeInput" type="text" inputmode="text" spellcheck="false" placeholder="Paste a code like 5a0213… or a result link">
+        <input id="codeInput" type="text" inputmode="text" spellcheck="false" placeholder="Card ID, like 7KQ2-M9XD-PT3H-WZ, or a link">
         <button class="btn" type="submit" id="codeGo">Open result</button>
       </div>
       <p class="status" id="codeStatus" role="status"></p>
@@ -636,8 +652,8 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
             <button class="btn" type="button" id="cardDownload">Download card</button>
             <button class="btn" type="button" id="cardLink">Copy result link</button>
           </div>
-          <p class="note" style="margin:0">Result code: <code id="resCode"></code></p>
-          <p class="note" style="margin:0">The link rebuilds this exact result on any device, so it doubles as your backup.</p>
+          <p class="note" style="margin:0">Card ID: <code id="resCode"></code></p>
+          <p class="note" style="margin:0">Type this ID on the home page of any device, or open the link, to get this exact card back. The back of the card is waiting in your history.</p>
           <p class="status" id="cardStatus" role="status"></p>
         </div>
       </div>
@@ -712,6 +728,21 @@ a:focus-visible { outline: 3px solid var(--spot); outline-offset: 2px; }
     </div>
     <p class="status" id="status" role="status"></p>
   </section>
+
+  <dialog id="cardDialog" class="carddlg" aria-labelledby="dlgTitle">
+    <div class="dlg-inner">
+      <h2 class="label" id="dlgTitle" style="margin:0"></h2>
+      <div class="flip" id="flip" role="button" tabindex="-1" aria-label="Flip the card">
+        <div class="flip-inner"><img id="dlgFront" class="face front" alt="" width="750" height="1050"><img id="dlgBack" class="face back" alt="" width="750" height="1050"></div>
+      </div>
+      <div class="dlg-actions">
+        <button class="btn primary" type="button" id="dlgFlip">Show the back</button>
+        <button class="btn" type="button" id="dlgOpen">Open full result</button>
+        <button class="btn" type="button" id="dlgClose">Close</button>
+      </div>
+      <p class="note" style="margin:0">Card ID <code id="dlgCode"></code></p>
+    </div>
+  </dialog>
 </main>
 
 <script src="data.js"></script>

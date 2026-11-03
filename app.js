@@ -618,47 +618,65 @@ function renderAnalysis(w, picksUsed, me, order) {
 }
 
 /* ================= Official portraits =================
-   1. AniList's public API (batched, series-checked).
-   2. Fail-safe: MyAnimeList via the public Jikan API, one request at a time.
-   3. Otherwise the generated splash art.
+   Lookup order, stopping at the first real picture:
+   1. AniList, searched by English name AND Japanese name, accepted only when the series matches.
+   2. MyAnimeList (public Jikan API) character search, matched by Japanese name or by
+      romanised name with long vowels folded (Giyu = Giyuu, Kyojuro = Kyoujurou).
+   3. MyAnimeList series cast list: find the anime, then the character in its cast.
+   4. The quiz's own generated art.
    Images are shown straight from those sites with a credit link; nothing is copied here.
-   Results are cached per browser; a picture that fails to load moves on to the next source. */
-var PORTRAIT_KEY = "anime-quiz-portraits-v2";
+   A "not found" is remembered for three days only, and network errors are never cached. */
+var PORTRAIT_KEY = "anime-quiz-portraits-v3", MISS_TTL = 3 * 864e5;
 var portraits = {};
 var aniPending = {}, aniOff = !PORTRAITS_ONLINE, malOff = !PORTRAITS_ONLINE;
-var malQueue = [], malBusy = false, malTried = {};
+var malQueue = [], malBusy = false, malState = {}, castCache = {};
 try { portraits = JSON.parse(localStorage.getItem(PORTRAIT_KEY)) || {}; } catch (e) { portraits = {}; }
+Object.keys(portraits).forEach(function (k) { var p = portraits[k]; if (!p || (p.miss && Date.now() - p.miss > MISS_TTL)) delete portraits[k]; });
 function savePortraits() { try { localStorage.setItem(PORTRAIT_KEY, JSON.stringify(portraits)); } catch (e) {} }
 
 function slug(s) { return String(s || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]/g, ""); }
+/* Fold romanisation differences: long vowels, macrons (already stripped by NFKD), "wo"/"o". */
+function fold(s) { return slug(s).replace(/ou/g, "o").replace(/oh/g, "o").replace(/uu/g, "u").replace(/oo/g, "o").replace(/aa/g, "a").replace(/ii/g, "i").replace(/ee/g, "e"); }
+function kana(s) { return String(s || "").replace(/[\s・･·=＝]/g, ""); }
+function nameTokens(n) { return n.split(/[\s,.]+/).map(fold).filter(function (t) { return t.length > 1; }); }
+function nameMatches(ours, theirs, nick) {
+  var have = fold(theirs) + "|" + fold((nick || []).join(" "));
+  var want = nameTokens(ours);
+  return want.length > 0 && want.every(function (t) { return have.indexOf(t) >= 0; });
+}
 function seriesMatch(series, titles) {
-  var want = slug(series).slice(0, 7);
-  return titles.some(function (t) { var s = slug(t); return s && (s.indexOf(want) >= 0 || want.indexOf(s.slice(0, 7)) >= 0); });
+  var want = fold(series).slice(0, 7);
+  return titles.some(function (t) { var s = fold(t); return s && (s.indexOf(want) >= 0 || want.indexOf(s.slice(0, 7)) >= 0); });
 }
 var SEARCH_AS = { "L": "L Lawliet", "Louise": "Louise Francoise", "Goku": "Son Goku" };
 
 function portraitOf(c) { var p = portraits[c.name]; return p && p.img ? p : null; }
 function avatarURL(c, size) { var p = portraitOf(c); return p ? p.img : thumbURL(c, size); }
+function setPortrait(c, p) { portraits[c.name] = p; savePortraits(); refreshSoon(); }
+function markMiss(c) { if (!portraitOf(c)) { portraits[c.name] = { miss: Date.now() }; savePortraits(); } }
 
 var refreshTimer = null;
 function refreshSoon() {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(function () {
-    if (!$("resultView").hidden && lastPicks) renderResult(false);
+    if (!$("resultView").hidden && lastTot) renderResult(false);
     if (!$("coverView").hidden) renderHistory();
-  }, 80);
+  }, 120);
 }
 
-/* Step 1: AniList, up to 12 characters per request. */
+/* ---- 1. AniList: two searches per character (English + Japanese), four characters per request ---- */
 function ensurePortraits(list) {
-  var need = list.filter(function (c) { return c && portraits[c.name] === undefined && !aniPending[c.name] && !malTried[c.name]; });
+  var need = list.filter(function (c) { return c && portraits[c.name] === undefined && !aniPending[c.name] && !malState[c.name]; });
   if (!need.length) return;
   if (aniOff) { need.forEach(queueMal); return; }
-  need = need.slice(0, 12);
+  for (var i = 0; i < need.length; i += 4) aniBatch(need.slice(i, i + 4));
+}
+function aniBatch(need) {
   need.forEach(function (c) { aniPending[c.name] = true; });
-  var fields = "{ name { full } siteUrl image { large } media(perPage: 4, sort: POPULARITY_DESC) { nodes { title { romaji english } } } }";
+  var fields = "{ name { full native alternative } siteUrl image { large } media(perPage: 3, sort: POPULARITY_DESC) { nodes { title { romaji english } } } }";
   var query = "query {" + need.map(function (c, i) {
-    return " a" + i + ": Page(perPage: 6) { characters(search: " + JSON.stringify(SEARCH_AS[c.name] || c.name) + ") " + fields + " }";
+    return " a" + i + ": Page(perPage: 5) { characters(search: " + JSON.stringify(SEARCH_AS[c.name] || c.name) + ") " + fields + " }" +
+           " b" + i + ": Page(perPage: 3) { characters(search: " + JSON.stringify(c.jp) + ") " + fields + " }";
   }).join("") + " }";
   fetch("https://graphql.anilist.co", {
     method: "POST",
@@ -670,17 +688,18 @@ function ensurePortraits(list) {
   }).then(function (j) {
     need.forEach(function (c, i) {
       delete aniPending[c.name];
-      var page = j && j.data && j.data["a" + i], hits = page && page.characters || [];
-      var pick = hits.filter(function (h) {
+      var hits = [].concat((j.data && j.data["a" + i] && j.data["a" + i].characters) || [], (j.data && j.data["b" + i] && j.data["b" + i].characters) || []);
+      var good = function (h) {
         var titles = (h.media && h.media.nodes || []).reduce(function (a, n) { return a.concat([n.title.romaji, n.title.english]); }, []);
-        return seriesMatch(c.series, titles);
-      })[0];
-      var img = pick && pick.image && pick.image.large;
-      if (img && !/\/default\.(jpg|png)/.test(img)) portraits[c.name] = { img: img, site: pick.siteUrl, src: "AniList" };
+        var img = h.image && h.image.large;
+        return img && !/\/default\.(jpg|png)/.test(img) && seriesMatch(c.series, titles);
+      };
+      var pick = hits.filter(function (h) { return good(h) && kana(h.name.native) === kana(c.jp); })[0] ||
+                 hits.filter(function (h) { return good(h) && nameMatches(c.name, h.name.full, h.name.alternative); })[0] ||
+                 hits.filter(good)[0];
+      if (pick) setPortrait(c, { img: pick.image.large, site: pick.siteUrl, src: "AniList" });
       else queueMal(c);
     });
-    savePortraits();
-    refreshSoon();
   }).catch(function (err) {
     need.forEach(function (c) { delete aniPending[c.name]; });
     if (!err || err.message !== "rate") aniOff = true;
@@ -688,48 +707,69 @@ function ensurePortraits(list) {
   });
 }
 
-/* Step 2: MyAnimeList through Jikan, spaced out to respect its rate limit. */
+/* ---- 2 + 3. MyAnimeList through Jikan, one request every 700 ms ---- */
 function queueMal(c) {
-  if (malTried[c.name] || malOff) { if (portraits[c.name] === undefined) portraits[c.name] = null; return; }
-  malTried[c.name] = true;
+  if (portraitOf(c) || malState[c.name]) return;
+  if (malOff) return;
+  malState[c.name] = "queued";
   malQueue.push(c);
   pumpMal();
+}
+function jikan(path) {
+  return fetch("https://api.jikan.moe/v4/" + path).then(function (r) {
+    if (r.status === 429) throw new Error("rate");
+    if (!r.ok) throw new Error("http");
+    return r.json();
+  });
+}
+function malImage(d) {
+  var img = d && d.images && ((d.images.webp && d.images.webp.image_url) || (d.images.jpg && d.images.jpg.image_url));
+  return img && !/questionmark|apple-touch/.test(img) ? img : null;
+}
+function malCharSearch(c) {
+  return jikan("characters?limit=10&order_by=favorites&sort=desc&q=" + encodeURIComponent(c.name)).then(function (j) {
+    var hit = (j.data || []).filter(function (d) {
+      return malImage(d) && ((d.name_kanji && kana(d.name_kanji) === kana(c.jp)) || nameMatches(c.name, d.name, d.nicknames));
+    })[0];
+    return hit ? { img: malImage(hit), site: hit.url, src: "MyAnimeList" } : null;
+  });
+}
+function malCast(c) {
+  var key = fold(c.series);
+  var cast = castCache[key] || (castCache[key] = jikan("anime?limit=3&order_by=members&sort=desc&q=" + encodeURIComponent(c.series)).then(function (j) {
+    var a = (j.data || [])[0];
+    if (!a) return [];
+    return new Promise(function (res) { setTimeout(res, 700); }).then(function () { return jikan("anime/" + a.mal_id + "/characters"); })
+      .then(function (k) { return (k.data || []).map(function (x) { return x.character; }); });
+  }));
+  return cast.then(function (list) {
+    var hit = list.filter(function (ch) { return malImage(ch) && nameMatches(c.name, ch.name.replace(/,/g, " ")); })[0];
+    return hit ? { img: malImage(hit), site: hit.url, src: "MyAnimeList" } : null;
+  });
 }
 function pumpMal() {
   if (malBusy || !malQueue.length) return;
   malBusy = true;
   var c = malQueue.shift();
-  fetch("https://api.jikan.moe/v4/characters?limit=8&order_by=favorites&sort=desc&q=" + encodeURIComponent(c.name))
-    .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
-    .then(function (j) {
-      var jp = slug(c.jp), want = c.name.split(/\s+/).map(slug).filter(function (t) { return t.length > 1; });
-      var hit = (j.data || []).filter(function (d) {
-        var img = d.images && d.images.jpg && d.images.jpg.image_url;
-        if (!img || /questionmark/.test(img)) return false;
-        var kanji = slug((d.name_kanji || "").replace(/\s/g, ""));
-        var nm = slug(d.name) + slug((d.nicknames || []).join(""));
-        return (jp && kanji && kanji === jp) || want.every(function (t) { return nm.indexOf(t) >= 0; });
-      })[0];
-      portraits[c.name] = hit ? { img: (hit.images.webp && hit.images.webp.image_url) || hit.images.jpg.image_url, site: hit.url, src: "MyAnimeList" } : null;
-      savePortraits();
-      refreshSoon();
-    })
-    .catch(function (e) {
-      if (portraits[c.name] === undefined) portraits[c.name] = null;
-      if (e && e.message !== "429") malOff = true;
-      else { malTried[c.name] = false; }
-    })
-    .then(function () { setTimeout(function () { malBusy = false; pumpMal(); }, 450); });
+  malCharSearch(c).then(function (p) {
+    if (p) return p;
+    return new Promise(function (res) { setTimeout(res, 700); }).then(function () { return malCast(c); });
+  }).then(function (p) {
+    malState[c.name] = "done";
+    if (p) setPortrait(c, p); else markMiss(c);
+  }).catch(function (err) {
+    if (err && err.message === "rate") { malState[c.name] = null; malQueue.push(c); }
+    else { malState[c.name] = null; malOff = true; }
+  }).then(function () { setTimeout(function () { malBusy = false; pumpMal(); }, 700); });
 }
 
-/* A picture that won't load: try the next source, then give up on it for this session. */
+/* A picture that won't load moves on to the next source. */
 function portraitBroken(name) {
-  var c = CHARACTERS.filter(function (x) { return x.name === name; })[0], p = portraits[name];
-  if (!c || !p) return;
-  portraits[name] = undefined;
+  var c = charByName(name), p = portraits[name];
+  if (!c || !p || !p.img) return;
   delete portraits[name];
-  if (p.src === "AniList") queueMal(c); else portraits[name] = null;
   savePortraits();
+  if (p.src === "AniList") queueMal(c); else markMiss(c);
   refreshSoon();
 }
 function watchImages(root) {
@@ -759,36 +799,82 @@ function showPortrait(me) {
   watchImages($("reveal"));
 }
 
-/* ================= Saved history and result codes =================
-   A result code holds the story version, the character filter and every answer
-   (one character per chapter). The same code rebuilds the same result on any device,
-   so it works as a share link and as a backup, with no account or server.
-   History is kept in this browser's localStorage. */
-var HIST_KEY = "anime-quiz-history-v1", CODE_VER = "5", HIST_MAX = 40;
-var POOL_CODE = { any: "a", M: "m", F: "f" }, CODE_POOL = { a: "any", m: "M", f: "F" };
+/* ================= Card IDs and saved history =================
+   A result depends only on the ten trait totals and the character filter, so a card ID packs
+   exactly those into 13 Crockford base-32 characters plus one check character, written in
+   groups of four like a game redeem code: 7KQ2-M9XD-PT3H-WZ. Easy-to-confuse letters
+   (O/0, I/L/1, U/V) are accepted either way, and the check character catches typos.
+   The same ID rebuilds the same result on any device. History lives in this browser. */
+var HIST_KEY = "anime-quiz-history-v2", HIST_OLD = "anime-quiz-history-v1", HIST_MAX = 40;
+var B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ", POOL_KEYS = ["any", "M", "F"];
+var BOUND = {}, CODE_LEN = 0;
+(function () {
+  TKEYS.forEach(function (k) {
+    BOUND[k] = 0;
+    SLOTS.forEach(function (s) { var m = 0; s.qs.forEach(function (q) { q.a.forEach(function (a) { m = Math.max(m, a.w[k] || 0); }); }); BOUND[k] += m; });
+  });
+  var total = 3n;
+  TKEYS.forEach(function (k) { total *= BigInt(BOUND[k] + 1); });
+  var cap = 1n;
+  while (cap < total) { cap *= 32n; CODE_LEN++; }
+})();
 
-function encodeResult(p, poolKey) {
-  return CODE_VER + (POOL_CODE[poolKey] || "a") + p.map(function (n) { return n.toString(36); }).join("");
+function checkChar(s) {
+  var sum = 0;
+  for (var i = 0; i < s.length; i++) sum += (B32.indexOf(s[i]) + 1) * (i + 3);
+  return B32[sum % 32];
 }
-function decodeResult(raw) {
-  var code = String(raw || "").trim();
-  var m = code.match(/r=([0-9a-z]+)/i);
-  if (m) code = m[1];
-  code = code.toLowerCase();
-  if (code[0] !== CODE_VER || !CODE_POOL[code[1]]) return null;
-  var digits = code.slice(2);
-  if (digits.length !== SLOTS.length) return null;
-  var p = digits.split("").map(function (ch) { return parseInt(ch, 36); });
-  for (var i = 0; i < p.length; i++) {
-    var q = walk(p, i).shown[i];
-    if (!q || isNaN(p[i]) || p[i] >= q.a.length) return null;
+function groupCode(s) { return s.match(/.{1,4}/g).join("-"); }
+function encodeTot(tot, poolKey) {
+  var n = BigInt(Math.max(0, POOL_KEYS.indexOf(poolKey))), mul = 3n;
+  TKEYS.forEach(function (k) {
+    var v = Math.max(0, Math.min(BOUND[k], tot[k] | 0));
+    n += BigInt(v) * mul; mul *= BigInt(BOUND[k] + 1);
+  });
+  var s = "";
+  for (var i = 0; i < CODE_LEN; i++) { s = B32[Number(n % 32n)] + s; n /= 32n; }
+  return groupCode(s + checkChar(s));
+}
+function cleanCode(raw) {
+  return String(raw || "").toUpperCase().replace(/O/g, "0").replace(/[IL]/g, "1").replace(/U/g, "V").replace(/[^0-9A-Z]/g, "");
+}
+/* Accepts a card ID, a link containing one, or an old long-format code. Returns { tot, pool } or null. */
+function decodeAny(raw) {
+  var str = String(raw || "").trim();
+  var m = str.match(/[#?&](?:c|r)=([^&\s]+)/i);
+  if (m) str = decodeURIComponent(m[1]);
+  var legacy = str.toLowerCase().match(/^5([amf])([0-9a-z]{35})$/);
+  if (legacy) {
+    var p = legacy[2].split("").map(function (ch) { return parseInt(ch, 36); });
+    for (var i = 0; i < p.length; i++) { var q = walk(p, i).shown[i]; if (!q || isNaN(p[i]) || p[i] >= q.a.length) return null; }
+    return { tot: walk(p).tot, pool: { a: "any", m: "M", f: "F" }[legacy[1]] };
   }
-  return { picks: p, pool: CODE_POOL[code[1]] };
+  var s = cleanCode(str);
+  if (s.length !== CODE_LEN + 1) return null;
+  var body = s.slice(0, CODE_LEN);
+  if (checkChar(body) !== s[CODE_LEN]) return null;
+  var n = 0n;
+  for (var j = 0; j < body.length; j++) { var d = B32.indexOf(body[j]); if (d < 0) return null; n = n * 32n + BigInt(d); }
+  var poolIdx = Number(n % 3n); n /= 3n;
+  var tot = {};
+  TKEYS.forEach(function (k) { var r = BigInt(BOUND[k] + 1); tot[k] = Number(n % r); n /= r; });
+  if (n !== 0n) return null;
+  return { tot: tot, pool: POOL_KEYS[poolIdx] };
 }
-function resultLink(code) { return location.origin + location.pathname + "#r=" + code; }
+function resultLink(code) { return location.origin + location.pathname + "#c=" + code; }
 
 function loadHistory() {
-  try { var h = JSON.parse(localStorage.getItem(HIST_KEY)); return Array.isArray(h) ? h : []; } catch (e) { return []; }
+  try {
+    var h = JSON.parse(localStorage.getItem(HIST_KEY));
+    if (Array.isArray(h)) return h;
+    var old = JSON.parse(localStorage.getItem(HIST_OLD));
+    if (Array.isArray(old)) {
+      var moved = old.map(function (e) { var d = decodeAny(e.code); return d ? Object.assign({}, e, { code: encodeTot(d.tot, d.pool), tot: d.tot, pool: d.pool }) : null; }).filter(Boolean);
+      saveHistory(moved);
+      return moved;
+    }
+  } catch (e) {}
+  return [];
 }
 function saveHistory(list) {
   try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); return true; } catch (e) { return false; }
@@ -810,178 +896,419 @@ function renderHistory() {
     var url = c ? avatarURL(c, 120) : "";
     var d = new Date(e.date), when = isNaN(d) ? "" : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
     return '<li class="hist" style="--hc:' + esc(e.spot || "#ff5ca8") + '">' +
-      '<button type="button" class="hist-open" data-code="' + esc(e.code) + '">' +
+      '<button type="button" class="hist-open" data-i="' + i + '" aria-label="View the card for ' + esc(e.name) + '">' +
       (url ? '<img src="' + url + '" alt="" width="56" height="56"' + (c && portraitOf(c) ? ' data-pname="' + esc(c.name) + '"' : "") + ' referrerpolicy="no-referrer">' : "") +
-      "<span><b>" + esc(e.name) + "</b><small>" + esc(T.name) + " · " + esc(e.tier || "") + " " + (e.sync || "") + "%</small><small>" + esc(when) + (e.pool && e.pool !== "any" ? " · " + esc(POOLS[e.pool].label) : "") + "</small></span></button>" +
+      "<span><b>" + esc(e.name) + "</b><small>" + esc(T.name) + " · " + esc(e.tier || "") + " · " + esc(when) + "</small><code>" + esc(e.code) + "</code></span></button>" +
       '<button type="button" class="hist-del" data-del="' + i + '" aria-label="Remove ' + esc(e.name) + ' from history">×</button></li>';
   }).join("");
   watchImages(ul);
 }
 
-/* ================= Trading card =================
-   A 750 x 1050 collectible card drawn on canvas: portrait (or generated art), type, tier,
-   sync rate, battle stats with grades, ending, catchphrase, holder name and serial. */
+/* ================= Trading card (front and back) =================
+   750 x 1050, drawn on canvas. The front is the shareable side; the back is only shown
+   on this site, in your saved history.
+   What makes each card yours, even when two people pull the same character:
+   - Element: your strongest trait, which also colours the card's flames.
+   - Signature move: element + your type's move, so it changes with your answers.
+   - HP / ATK / DEF and level: computed from your own trait totals.
+   - Foil print: the flame layout and sparkle pattern are seeded by your card ID.
+   - Hanko seal: a personal stamp generated from your card ID and holder name.
+   - Holder name, pull date, card ID, and (on the back) your defining moment from the story. */
 var HOLDER_KEY = "anime-quiz-holder";
-var cardState = null, cardURL = "", cardBlob = null, cardTimer = null;
 var DISPLAY = '"Dela Gothic One", Impact, sans-serif', BODY = '"Zen Kaku Gothic New", system-ui, sans-serif';
+var ELEMENTS = {
+  g: ["Fire", "炎", ["#ff4d1f", "#ffb02e", "#ffe066"]], h: ["Light", "光", ["#ffc93a", "#fff1a8", "#ffffff"]],
+  b: ["Mind", "知", ["#1fc9bb", "#8ff3e4", "#e6fffb"]], c: ["Ice", "氷", ["#3fb6ff", "#a8e6ff", "#ffffff"]],
+  x: ["Wind", "風", ["#5fd63f", "#cfff5a", "#f2ffd0"]], d: ["Earth", "地", ["#d0761f", "#ffbf5e", "#ffe7b8"]],
+  s: ["Shadow", "影", ["#8f3dff", "#d08bff", "#ffd6ff"]], e: ["Thunder", "雷", ["#ffd60a", "#fff58a", "#8fe8ff"]],
+  t: ["Thorn", "棘", ["#ff2f73", "#ff9ec2", "#ffe0ec"]], q: ["Moon", "月", ["#7f99ff", "#c9d4ff", "#ffffff"]]
+};
+var MOVES = {
+  tsun: "Not-For-You Barrage", kuu: "Absolute Zero Glance", dan: "Whispered Page", yan: "Forever Embrace", dere: "Sunshine Heart Burst",
+  hime: "Royal Decree", kami: "Divine Verdict", sado: "Gotcha Grin", baka: "Accidental Masterstroke", daru: "Five More Minutes",
+  doro: "Sugar-Coated Strike", genki: "Hyper Sunrise Dash", nekketsu: "Unbreakable Spirit Fist", chuuni: "Sealed Eye Unleashed",
+  strat: "Twelve Moves Ahead", mentor: "First Lesson", lone: "Lone Fang"
+};
+var SKILLS = {
+  tsun: "Hits hard while insisting it wasn't on purpose. Power doubles when someone says thank you.",
+  kuu: "Freezes the battlefield with one look. Enemies forget what they were saying.",
+  dan: "A quiet strike from behind the bookshelf. Nobody sees it coming, including you.",
+  yan: "Locks onto one target forever. Cannot be redirected, reasoned with or escaped.",
+  dere: "Heals every ally with pure affection. Also works on enemies, to their confusion.",
+  hime: "Commands the field to kneel. Allies gain a crown; enemies gain an urge to apologise.",
+  kami: "Rewrites the rules of the fight. The universe agrees, mostly out of fear.",
+  sado: "Teases the opponent until they turn red and forget to defend.",
+  baka: "Trips, falls, and somehow lands the winning blow. Cannot be predicted, even by you.",
+  daru: "Skips a turn to nap, then ends the fight in one move. Refuses to explain.",
+  doro: "A sweet smile that hides a sharp edge. Damage arrives three turns later.",
+  genki: "Dashes in with unstoppable energy. Party morale rises with every step.",
+  nekketsu: "Gets stronger every time you fall. Ignores the word impossible.",
+  chuuni: "Unleashes a power sealed in your arm. Comes with a 40-page backstory.",
+  strat: "Predicts the enemy's next twelve moves and lays a trap for each.",
+  mentor: "Teaches allies a new technique mid-battle. Shows up exactly when needed.",
+  lone: "Strikes alone from the edge of the scene, then walks away without a word."
+};
+var cardState = null, cardURL = "", cardBlob = null, cardTimer = null;
 
+function powerLevel(profile, name) {
+  return Math.round((profile[0] * 3 + profile[5] * 2.5 + profile[6] * 1.5 + profile[2] * 1.2 + profile[1] + profile[3] + profile[4] + profile[7] + profile[8] + profile[9] * .5) * 43 + seeded(name)() * 97);
+}
+function getHolder() { try { return localStorage.getItem(HOLDER_KEY) || ""; } catch (e) { return ""; } }
+
+/* Everything the card needs, rebuilt from trait totals and the character filter. */
+function cardData(tot, poolKey, extra) {
+  var profile = TKEYS.map(function (k) { return tot[k]; }), order = rank(profile, poolKey);
+  var me = order[0].c, T = TYPES[me.type], n = normTraits(tot);
+  var sync = Math.max(1, Math.round(order[0].r * 100)), tier = sync >= 80 ? "SSR" : sync >= 62 ? "SR" : "R";
+  var top = TKEYS.slice().sort(function (a, b) { return n[b] - n[a]; })[0], el = ELEMENTS[top];
+  var pw = powerLevel(profile, me.name);
+  var clampN = function (v) { return Math.max(100, Math.min(9999, Math.round(v))); };
+  var code = encodeTot(tot, poolKey);
+  return Object.assign({
+    me: me, T: T, sync: sync, tier: tier, stats: statBlock(tot), n: n, el: el, pw: pw,
+    lv: Math.max(1, Math.min(99, Math.round(pw / 140))),
+    hp: clampN(400 + 900 * (n.h * .45 + n.d * .3 + n.g * .25)),
+    atk: clampN(300 + 900 * (n.g * .5 + n.e * .2 + n.s * .3)),
+    def: clampN(300 + 900 * (n.c * .45 + n.b * .3 + n.q * .25)),
+    move: el[0] + " " + MOVES[me.type], skill: SKILLS[me.type],
+    code: code, ending: pickEnding(n)[0], holder: getHolder(), date: new Date().toISOString(), moment: null
+  }, extra || {});
+}
+
+/* ---------- drawing helpers ---------- */
 function rrect(x, X, Y, W, H, r) {
   x.beginPath(); x.moveTo(X + r, Y); x.arcTo(X + W, Y, X + W, Y + H, r); x.arcTo(X + W, Y + H, X, Y + H, r);
   x.arcTo(X, Y + H, X, Y, r); x.arcTo(X, Y, X + W, Y, r); x.closePath();
 }
-function fitFont(x, text, family, weight, max, width) {
+function cutRect(x, X, Y, W, H, k) {
+  x.beginPath(); x.moveTo(X + k, Y); x.lineTo(X + W, Y); x.lineTo(X + W, Y + H - k); x.lineTo(X + W - k, Y + H); x.lineTo(X, Y + H); x.lineTo(X, Y + k); x.closePath();
+}
+function fitSize(x, text, family, max, width, min) {
   var size = max;
-  do { x.font = weight + " " + size + "px " + family; size -= 2; } while (x.measureText(text).width > width && size > 14);
+  do { x.font = "400 " + size + "px " + family; size -= 2; } while (x.measureText(text).width > width && size > (min || 16));
   return size + 2;
 }
 function wrapLines(x, text, width, maxLines) {
-  var words = text.split(" "), lines = [], line = "";
-  words.forEach(function (w) {
-    var t = line ? line + " " + w : w;
-    if (x.measureText(t).width > width && line) { lines.push(line); line = w; } else line = t;
-  });
+  var words = String(text).split(" "), lines = [], line = "";
+  words.forEach(function (w) { var t = line ? line + " " + w : w; if (x.measureText(t).width > width && line) { lines.push(line); line = w; } else line = t; });
   if (line) lines.push(line);
   if (lines.length > maxLines) { lines = lines.slice(0, maxLines); lines[maxLines - 1] = lines[maxLines - 1].replace(/\s+\S*$/, "") + "…"; }
   return lines;
 }
+function slanted(x, text, px, py, size, fill, strokeW, align) {
+  x.save(); x.translate(px, py); x.transform(1, 0, -0.2, 1, 0, 0);
+  x.font = "400 " + size + "px " + DISPLAY; x.textAlign = align || "left"; x.lineJoin = "round";
+  if (strokeW) { x.lineWidth = strokeW; x.strokeStyle = "#12051c"; x.strokeText(text, 0, 0); }
+  x.fillStyle = fill; x.fillText(text, 0, 0);
+  x.restore();
+}
+function goldFill(x, y0, y1, el) {
+  var g = x.createLinearGradient(0, y0, 0, y1);
+  g.addColorStop(0, "#fff6c4"); g.addColorStop(.5, el ? el[2][1] : "#ffc93a"); g.addColorStop(1, el ? el[2][0] : "#ff7a1f");
+  return g;
+}
 
-function drawCard(cv, S, portrait) {
-  var W = 750, H = 1050, x = cv.getContext("2d");
-  cv.width = W; cv.height = H;
-  var c = S.me, T = S.T, spot = c.spot, ink = "#101218", paper = "#fffaf2";
-  var light = mix(spot, "#ffffff", .55), deep = mix(spot, "#000000", .35);
-
-  /* body and foil */
-  x.fillStyle = ink; rrect(x, 0, 0, W, H, 34); x.fill();
-  var g = x.createLinearGradient(0, 0, W, H);
-  g.addColorStop(0, light); g.addColorStop(.45, spot); g.addColorStop(.7, mix(spot, "#ffe9a8", .35)); g.addColorStop(1, deep);
-  x.fillStyle = g; rrect(x, 16, 16, W - 32, H - 32, 24); x.fill();
-  x.save(); rrect(x, 16, 16, W - 32, H - 32, 24); x.clip();
-  x.globalAlpha = .09; x.fillStyle = "#ffffff";
-  for (var i = -H; i < W + H; i += 34) { x.beginPath(); x.moveTo(i, 0); x.lineTo(i + 14, 0); x.lineTo(i + 14 - H, H); x.lineTo(i - H, H); x.fill(); }
-  x.globalAlpha = 1; x.restore();
-
-  /* header */
-  x.fillStyle = paper; rrect(x, 36, 34, W - 72, 92, 14); x.fill();
-  x.lineWidth = 4; x.strokeStyle = ink; x.stroke();
-  x.fillStyle = ink; x.font = "700 17px " + BODY; x.textBaseline = "alphabetic";
-  x.fillText((ROLES[c.role] + " · " + T.name + " " + T.jp).toUpperCase(), 58, 64);
-  var ns = fitFont(x, c.name, DISPLAY, 400, 44, 470);
-  x.font = "400 " + ns + "px " + DISPLAY; x.fillText(c.name, 56, 110);
-  /* tier seal */
-  x.save(); x.translate(650, 80);
-  starPath(x, 0, 0, 62, 50, 16, 0); x.fillStyle = ink; x.fill();
-  x.beginPath(); x.arc(0, 0, 44, 0, 7); x.fillStyle = S.tier === "SSR" ? "#ffd23f" : S.tier === "SR" ? "#cfd6e6" : "#e6b48a"; x.fill();
-  x.fillStyle = ink; x.textAlign = "center"; x.font = "400 " + (S.tier.length > 2 ? 28 : 34) + "px " + DISPLAY; x.fillText(S.tier, 0, 9);
-  x.font = "700 13px " + BODY; x.fillText(S.sync + "% SYNC", 0, 30);
-  x.restore(); x.textAlign = "left";
-
-  /* art window */
-  var ax = 36, ay = 144, aw = W - 72, ah = 470;
-  var art = document.createElement("canvas");
-  var keep = current;
-  current = { c: c, portrait: !!portrait };
-  try { drawSplash(art, c, T, aw, ah); } catch (e) {}
-  current = keep;
-  x.save(); rrect(x, ax, ay, aw, ah, 10); x.clip();
-  x.drawImage(art, ax, ay, aw, ah);
-  if (portrait) {
-    var ph = ah - 50, pw = Math.min(aw * .6, ph * portrait.naturalWidth / portrait.naturalHeight), px = ax + (aw - pw) / 2, py = ay + 25;
-    x.fillStyle = ink; x.fillRect(px + 10, py + 10, pw, ph);
-    x.fillStyle = paper; x.fillRect(px - 6, py - 6, pw + 12, ph + 12);
-    var sc = Math.max(pw / portrait.naturalWidth, ph / portrait.naturalHeight);
-    var iw = portrait.naturalWidth * sc, ih = portrait.naturalHeight * sc;
-    x.save(); x.beginPath(); x.rect(px, py, pw, ph); x.clip();
-    x.drawImage(portrait, px + (pw - iw) / 2, py, iw, ih);
-    x.restore();
-    x.lineWidth = 4; x.strokeStyle = ink; x.strokeRect(px - 6, py - 6, pw + 12, ph + 12);
+function cardBackground(x, W, H, S, R) {
+  var base = mix("#12051c", S.me.spot, .1), glow = mix("#3a1058", S.me.spot, .25);
+  x.fillStyle = "#07030c"; rrect(x, 0, 0, W, H, 40); x.fill();
+  x.save(); rrect(x, 14, 14, W - 28, H - 28, 30); x.clip();
+  var g = x.createRadialGradient(W * .5, H * .38, 40, W * .5, H * .5, H * .75);
+  g.addColorStop(0, glow); g.addColorStop(1, base);
+  x.fillStyle = g; x.fillRect(0, 0, W, H);
+  for (var i = 0; i < 160; i++) {
+    x.fillStyle = "rgba(255,255,255," + (R() * .5 + .1).toFixed(2) + ")";
+    x.beginPath(); x.arc(R() * W, R() * H, R() * 1.8 + .3, 0, 7); x.fill();
   }
   x.restore();
-  x.lineWidth = 6; x.strokeStyle = ink; rrect(x, ax, ay, aw, ah, 10); x.stroke();
-  /* vertical name tag */
-  x.save(); x.font = "400 26px " + DISPLAY; x.textAlign = "center";
-  var chars = Array.from(c.jp).slice(0, 12), tagH = chars.length * 28 + 20;
-  x.fillStyle = paper; x.fillRect(ax + aw - 58, ay + 16, 42, tagH); x.lineWidth = 3; x.strokeRect(ax + aw - 58, ay + 16, 42, tagH);
-  x.fillStyle = ink; chars.forEach(function (ch, k) { x.fillText(ch, ax + aw - 37, ay + 50 + k * 28); });
+}
+/* The foil print: crescent flames placed by the card ID's own random stream. */
+function cardFlames(x, W, H, S, R, count, zones) {
+  var cols = S.el[2];
+  x.save(); rrect(x, 14, 14, W - 28, H - 28, 30); x.clip();
+  for (var i = 0; i < count; i++) {
+    var z = zones[i % zones.length];
+    var px = z[0] + R() * (z[2] - z[0]), py = z[1] + R() * (z[3] - z[1]);
+    var len = 90 + R() * 150, wid = 18 + R() * 30, ang = z[4] + (R() - .5) * 1.4;
+    x.save(); x.translate(px, py); x.rotate(ang);
+    var g = x.createLinearGradient(-len / 2, 0, len / 2, 0);
+    g.addColorStop(0, rgba(cols[0], 0)); g.addColorStop(.35, cols[0]); g.addColorStop(.75, cols[1]); g.addColorStop(1, cols[2]);
+    x.shadowColor = cols[0]; x.shadowBlur = 22;
+    x.fillStyle = g;
+    x.beginPath(); x.moveTo(-len / 2, 0);
+    x.quadraticCurveTo(0, -wid * 2.2, len / 2, -wid * .2);
+    x.quadraticCurveTo(len * .05, -wid * .7, -len / 2, 0);
+    x.fill();
+    x.restore();
+  }
+  x.restore();
+}
+function cardFrame(x, W, H, S, R) {
+  var cols = S.el[2];
+  var g = x.createLinearGradient(0, 0, W, H);
+  g.addColorStop(0, "#ffb8f0"); g.addColorStop(.5, cols[1]); g.addColorStop(1, "#ff9af0");
+  x.save(); x.shadowColor = cols[0]; x.shadowBlur = 24;
+  x.lineWidth = 5; x.strokeStyle = g; rrect(x, 26, 26, W - 52, H - 52, 28); x.stroke();
+  x.restore();
+  x.lineWidth = 1.5; x.strokeStyle = rgba(cols[2], .55); rrect(x, 40, 40, W - 80, H - 80, 20); x.stroke();
+  /* tech corners */
+  x.fillStyle = rgba(cols[2], .85); x.strokeStyle = rgba(cols[2], .85); x.lineWidth = 3;
+  var marks = function (ox, oy, sx, sy) {
+    x.beginPath(); x.moveTo(ox, oy + sy * 70); x.lineTo(ox, oy); x.lineTo(ox + sx * 110, oy); x.stroke();
+    for (var k = 0; k < 3; k++) x.fillRect(ox + sx * (130 + k * 22) - (sx < 0 ? 14 : 0), oy - 3, 14, 6);
+    for (var j = 0; j < 4; j++) if (R() < .7) x.fillRect(ox - (sx < 0 ? 6 : 0) + sx * 12, oy + sy * (24 + j * 16) - (sy < 0 ? 8 : 0), 6, 8);
+  };
+  marks(52, 52, 1, 1); marks(W - 52, H - 52, -1, -1);
+  x.beginPath(); x.moveTo(W - 52, H - 260); x.lineTo(W - 52, H - 150); x.stroke();
+  for (var s = 0; s < 6; s++) x.fillRect(W - 66, H - 250 + s * 14, 10, 6);
+}
+function ribbon(x, W, S) {
+  var X = W - 150, Y = 26, w = 96, h = 210;
+  var g = x.createLinearGradient(X, Y, X + w, Y + h);
+  g.addColorStop(0, "#ffd24a"); g.addColorStop(.6, "#ff8a1f"); g.addColorStop(1, "#ff4d1f");
+  x.save(); x.shadowColor = "rgba(0,0,0,.5)"; x.shadowBlur = 12;
+  x.beginPath(); x.moveTo(X, Y); x.lineTo(X + w, Y); x.lineTo(X + w, Y + h); x.lineTo(X + w / 2, Y + h - 30); x.lineTo(X, Y + h); x.closePath();
+  x.fillStyle = g; x.fill(); x.restore();
+  x.strokeStyle = "rgba(255,255,255,.6)"; x.lineWidth = 2; x.stroke();
+  var size = S.tier.length > 2 ? 46 : S.tier.length > 1 ? 58 : 74;
+  slanted(x, S.tier, X + w / 2 + 4, Y + 92, size, "#ffffff", 7, "center");
+  x.font = "700 15px " + BODY; x.textAlign = "center"; x.fillStyle = "#2a0a00";
+  x.fillText(S.sync + "% SYNC", X + w / 2, Y + 140); x.textAlign = "left";
+}
+function hanko(x, cx, cy, size, S) {
+  var R = seeded(S.code + "|" + (S.holder || "")), red = "#d8243c", cell = size / 7;
+  x.save(); x.translate(cx - size / 2, cy - size / 2); x.rotate(-.06);
+  x.globalAlpha = .9; x.strokeStyle = red; x.fillStyle = red; x.lineWidth = 4;
+  x.strokeRect(0, 0, size, size); x.lineWidth = 1.5; x.strokeRect(5, 5, size - 10, size - 10);
+  for (var r = 0; r < 5; r++) for (var c = 0; c < 3; c++) {
+    if (r > 0 && r < 4 && c > 0) continue;
+    if (R() < .55) { x.fillRect(cell * (1 + c), cell * (1 + r), cell * .86, cell * .86); x.fillRect(cell * (5 - c), cell * (1 + r), cell * .86, cell * .86); }
+  }
+  var glyph = S.holder ? S.holder.trim().charAt(0).toUpperCase() : S.el[1];
+  x.font = "400 " + Math.round(cell * 2.6) + "px " + DISPLAY; x.textAlign = "center"; x.textBaseline = "middle";
+  x.fillText(glyph, size / 2, size / 2 + 2);
+  x.restore(); x.textAlign = "left"; x.textBaseline = "alphabetic";
+}
+function artLayer(x, X, Y, W, H, S, portrait) {
+  x.save(); rrect(x, X, Y, W, H, 18); x.clip();
+  if (portrait) {
+    var sc = Math.max(W / portrait.naturalWidth, H / portrait.naturalHeight);
+    var iw = portrait.naturalWidth * sc, ih = portrait.naturalHeight * sc;
+    x.drawImage(portrait, X + (W - iw) / 2, Y, iw, ih);
+  } else {
+    var art = document.createElement("canvas"), keep = current;
+    current = { c: S.me, portrait: false };
+    try { drawSplash(art, S.me, S.T, W, H); x.drawImage(art, X, Y, W, H); } catch (e) {}
+    current = keep;
+  }
+  x.restore();
+}
+function iconHeart(x, cx, cy, s, col) { heartPath(x, cx, cy + 2, s); x.fillStyle = col; x.fill(); }
+function iconSword(x, cx, cy, s, col) {
+  x.save(); x.strokeStyle = col; x.lineWidth = 4; x.lineCap = "round";
+  [-1, 1].forEach(function (d) { x.beginPath(); x.moveTo(cx - s * d, cy - s); x.lineTo(cx + s * d, cy + s); x.stroke();
+    x.beginPath(); x.moveTo(cx + s * d * .55 - 6 * d, cy + s * .25); x.lineTo(cx + s * d * .2, cy + s * .7); x.stroke(); });
+  x.restore();
+}
+function iconShield(x, cx, cy, s, col) {
+  x.beginPath(); x.moveTo(cx, cy - s); x.lineTo(cx + s * .9, cy - s * .6); x.quadraticCurveTo(cx + s * .85, cy + s * .5, cx, cy + s);
+  x.quadraticCurveTo(cx - s * .85, cy + s * .5, cx - s * .9, cy - s * .6); x.closePath();
+  x.lineWidth = 3.5; x.strokeStyle = col; x.stroke();
+}
+function tabLabel(x, X, Y, text, S) {
+  x.font = "400 24px " + DISPLAY;
+  var w = x.measureText(text).width + 56;
+  var g = x.createLinearGradient(X, 0, X + w, 0); g.addColorStop(0, rgba(S.el[2][0], .9)); g.addColorStop(1, rgba(S.el[2][0], 0));
+  x.beginPath(); x.moveTo(X + 16, Y - 30); x.lineTo(X + w, Y - 30); x.lineTo(X + w - 16, Y + 6); x.lineTo(X, Y + 6); x.closePath();
+  x.fillStyle = g; x.fill();
+  slanted(x, text, X + 22, Y - 4, 24, "#ffffff", 0);
+}
+function panel(x, X, Y, W, H, S) {
+  cutRect(x, X, Y, W, H, 22);
+  x.fillStyle = "rgba(10,3,18,.72)"; x.fill();
+  x.lineWidth = 2.5; x.strokeStyle = rgba(S.el[2][1], .8); x.stroke();
+}
+
+/* ---------- front: the shareable side ---------- */
+function drawCardFront(cv, S, portrait) {
+  var W = 750, H = 1050, x = cv.getContext("2d"), R = seeded("front|" + S.code);
+  cv.width = W; cv.height = H;
+  cardBackground(x, W, H, S, R);
+  artLayer(x, 40, 40, W - 80, 760, S, portrait);
+  var fade = x.createLinearGradient(0, 520, 0, 860);
+  fade.addColorStop(0, "rgba(10,3,18,0)"); fade.addColorStop(1, "rgba(10,3,18,.96)");
+  x.save(); rrect(x, 40, 40, W - 80, H - 80, 20); x.clip(); x.fillStyle = fade; x.fillRect(0, 0, W, H); x.fillStyle = "rgba(10,3,18,.96)"; x.fillRect(0, 860, W, H); x.restore();
+  cardFlames(x, W, H, S, R, 16, [[20, 120, 120, 760, 1.2], [480, 40, 740, 260, 2.6], [20, 840, 700, 1030, .2], [380, 560, 720, 820, 2.2]]);
+  cardFrame(x, W, H, S, R);
+  ribbon(x, W, S);
+
+  /* element starburst */
+  x.save(); x.translate(605, 700);
+  starPath(x, 0, 0, 74, 54, 14, R()); x.shadowColor = S.el[2][0]; x.shadowBlur = 26;
+  x.fillStyle = goldFill(x, -70, 70, null); x.fill(); x.shadowBlur = 0;
+  x.lineWidth = 3; x.strokeStyle = "#5a2600"; x.stroke();
+  x.fillStyle = "#3a1200"; x.font = "400 50px " + DISPLAY; x.textAlign = "center"; x.textBaseline = "middle"; x.fillText(S.el[1], 0, 2);
+  x.restore(); x.textAlign = "left"; x.textBaseline = "alphabetic";
+
+  /* name */
+  var name = S.me.name, parts = name.split(" "), lines = [name];
+  x.font = "400 64px " + DISPLAY;
+  if (x.measureText(name).width > 470 && parts.length > 1) { var cut = Math.ceil(parts.length / 2); lines = [parts.slice(0, cut).join(" "), parts.slice(cut).join(" ")]; }
+  var size = Math.min.apply(null, lines.map(function (l) { return fitSize(x, l, DISPLAY, 64, 470, 30); }));
+  lines.forEach(function (l, i) { slanted(x, l, 86, 790 - (lines.length - 1 - i) * (size + 4), size, goldFill(x, 700, 800, S.el), 9); });
+
+  /* HP / ATK / DEF bar */
+  var bx = 74, by = 826, segs = [["HP", S.hp, "#b8e03a"], ["ATK", S.atk, "#ffa41f"], ["DEF", S.def, "#ff5f2e"]];
+  x.save(); x.transform(1, 0, -0.25, 1, 0, 0);
+  segs.forEach(function (sg, i) {
+    var sx = bx + 200 + i * 150;
+    var g = x.createLinearGradient(sx, 0, sx + 148, 0); g.addColorStop(0, sg[2]); g.addColorStop(1, mix(sg[2], "#3a1200", .25));
+    x.fillStyle = g; x.fillRect(sx, by, 146, 42);
+    x.fillStyle = "#2a0d00"; x.font = "700 16px " + BODY; x.fillText(sg[0], sx + 12, by + 27);
+    x.font = "400 24px " + DISPLAY; x.fillText(String(sg[1]).padStart(4, "0"), sx + (sg[0].length > 2 ? 54 : 46), by + 30);
+  });
   x.restore();
 
-  /* series strip */
-  x.fillStyle = ink; rrect(x, 36, 630, W - 72, 46, 10); x.fill();
-  x.fillStyle = paper; x.font = "700 19px " + BODY;
-  var series = "from " + c.series;
-  while (x.measureText(series).width > 470 && series.length > 10) series = series.slice(0, -2);
-  if (series !== "from " + c.series) series += "…";
-  x.fillText(series, 56, 660);
-  x.textAlign = "right"; x.fillStyle = "#ffd23f"; x.font = "400 20px " + DISPLAY;
-  x.fillText("PWR " + S.pw.toLocaleString("en-US"), W - 56, 661); x.textAlign = "left";
+  /* special move + tag */
+  var ms = fitSize(x, S.move, DISPLAY, 42, 440, 24);
+  slanted(x, S.move, 340, 918, ms, goldFill(x, 880, 920, S.el), 7, "center");
+  x.strokeStyle = rgba(S.el[2][1], .8); x.lineWidth = 2;
+  x.beginPath(); x.moveTo(130, 942); x.lineTo(550, 942); x.stroke();
+  x.fillStyle = "#f3e9ff"; x.font = "700 17px " + BODY; x.textAlign = "center";
+  var tag = (S.T.name + " / " + ROLES[S.me.role]).toUpperCase().split("").join(String.fromCharCode(8202));
+  x.fillText(tag, 340, 968);
 
-  /* stats panel */
-  x.fillStyle = paper; rrect(x, 36, 690, W - 72, 210, 14); x.fill(); x.lineWidth = 4; x.strokeStyle = ink; x.stroke();
-  var cx = 150, cy = 795, R = 78, N = S.stats.length;
-  var pt = function (k, r) { var a = -Math.PI / 2 + k * Math.PI * 2 / N; return [cx + Math.cos(a) * r, cy + Math.sin(a) * r]; };
-  [1, .5].forEach(function (k) {
-    x.beginPath(); S.stats.forEach(function (_, j) { var p = pt(j, R * k); x[j ? "lineTo" : "moveTo"](p[0], p[1]); }); x.closePath();
-    x.strokeStyle = k === 1 ? ink : "rgba(16,18,24,.3)"; x.lineWidth = k === 1 ? 3 : 1.5; x.stroke();
-  });
-  x.beginPath(); S.stats.forEach(function (st, j) { var p = pt(j, R * Math.max(.1, Math.min(1, st[1] / 2))); x[j ? "lineTo" : "moveTo"](p[0], p[1]); }); x.closePath();
-  x.fillStyle = rgba(spot, .65); x.fill(); x.strokeStyle = ink; x.lineWidth = 3; x.stroke();
-  S.stats.forEach(function (st, j) {
-    var col = j < 4 ? 0 : 1, row = j % 4, sx = 280 + col * 215, sy = 728 + row * 44;
-    var gr = grade(st[1]);
-    x.fillStyle = ink; x.font = "700 18px " + BODY; x.fillText(st[0], sx, sy + 20);
-    x.fillStyle = gr === "S" ? spot : paper; x.fillRect(sx + 132, sy, 34, 30); x.lineWidth = 2.5; x.strokeStyle = ink; x.strokeRect(sx + 132, sy, 34, 30);
-    x.fillStyle = ink; x.textAlign = "center"; x.font = "400 20px " + DISPLAY; x.fillText(gr, sx + 149, sy + 23); x.textAlign = "left";
-  });
+  /* level badge */
+  x.save(); x.translate(640, 912);
+  x.shadowColor = "#3fa8ff"; x.shadowBlur = 24;
+  x.beginPath(); x.arc(0, 0, 62, 0, 7); x.fillStyle = "#0b1d4a"; x.fill();
+  x.shadowBlur = 0; x.lineWidth = 6; x.strokeStyle = "#3fa8ff"; x.stroke();
+  x.lineWidth = 2; x.strokeStyle = "#ffd24a"; x.beginPath(); x.arc(0, 0, 52, 0, 7); x.stroke();
+  x.textAlign = "center"; x.fillStyle = "#ffffff"; x.font = "400 20px " + DISPLAY; x.fillText("LV", 0, -18);
+  x.fillStyle = goldFill(x, -10, 40, null); x.font = "400 52px " + DISPLAY; x.fillText(String(S.lv).padStart(2, "0"), 0, 36);
+  x.restore(); x.textAlign = "left";
 
-  /* catchphrase */
-  x.fillStyle = paper; rrect(x, 36, 914, W - 72, 74, 37); x.fill(); x.lineWidth = 4; x.strokeStyle = ink; x.stroke();
-  x.fillStyle = ink; x.font = "700 18px " + BODY;
-  wrapLines(x, T.love, W - 150, 2).forEach(function (l, k, arr) { x.fillText(l, 70, 945 + k * 24 - (arr.length === 1 ? -10 : 0)); });
-
-  /* footer */
-  x.fillStyle = ink; x.font = "700 15px " + BODY;
-  x.fillText(("Holder: " + (S.holder || "Unknown hero")).toUpperCase().slice(0, 40), 40, 1022);
-  x.textAlign = "right"; x.fillText("No. " + S.serial + " · " + S.ending.toUpperCase(), W - 40, 1022); x.textAlign = "left";
+  /* holder + id */
+  x.fillStyle = "rgba(243,233,255,.8)"; x.font = "700 14px " + BODY; x.textAlign = "center";
+  x.fillText(("Holder: " + (S.holder || "Unknown hero")).toUpperCase().slice(0, 26) + "  ·  ID " + S.code, 300, 1004);
+  x.textAlign = "left";
 }
 
-function cardSerial(code) {
-  var h = 0; for (var i = 0; i < code.length; i++) h = (h * 31 + code.charCodeAt(i)) >>> 0;
-  return String(h % 10000).padStart(4, "0") + "/" + CHARACTERS.length;
+/* ---------- back: only shown on this site, in your history ---------- */
+function drawCardBack(cv, S, portrait) {
+  var W = 750, H = 1050, x = cv.getContext("2d"), R = seeded("back|" + S.code);
+  cv.width = W; cv.height = H;
+  cardBackground(x, W, H, S, R);
+  cardFlames(x, W, H, S, R, 9, [[20, 40, 260, 160, 2.9], [20, 860, 740, 1030, .3], [600, 300, 740, 860, 1.6]]);
+  cardFrame(x, W, H, S, R);
+  ribbon(x, W, S);
+
+  /* header */
+  x.strokeStyle = rgba(S.el[2][1], .9); x.lineWidth = 3;
+  x.beginPath(); x.moveTo(66, 80); x.lineTo(96, 80); x.lineTo(120, 150); x.lineTo(560, 150); x.stroke();
+  var ns = fitSize(x, S.me.name, DISPLAY, 50, 440, 26);
+  slanted(x, S.me.name, 124, 128, ns, goldFill(x, 90, 130, S.el), 7);
+  x.fillStyle = "#e9dcff"; x.font = "700 16px " + BODY;
+  x.fillText((S.T.name + " · " + S.T.jp + " / " + ROLES[S.me.role] + " · " + S.me.series).toUpperCase().slice(0, 52), 130, 176);
+
+  /* portrait + stats */
+  x.save(); cutRect(x, 60, 214, 220, 220, 26); x.clip();
+  if (portrait) {
+    var sc = Math.max(220 / portrait.naturalWidth, 220 / portrait.naturalHeight);
+    x.drawImage(portrait, 60 + (220 - portrait.naturalWidth * sc) / 2, 214, portrait.naturalWidth * sc, portrait.naturalHeight * sc);
+  } else { artLayer(x, 60, 214, 220, 220, S, null); }
+  x.restore();
+  cutRect(x, 60, 214, 220, 220, 26); x.lineWidth = 3; x.strokeStyle = S.el[2][1]; x.stroke();
+  panel(x, 308, 236, 382, 198, S);
+  tabLabel(x, 328, 240, "STATS (LV. " + S.lv + ")", S);
+  [["HP", S.hp, iconHeart], ["ATK", S.atk, iconSword], ["DEF", S.def, iconShield]].forEach(function (row, i) {
+    var ry = 296 + i * 50;
+    row[2](x, 346, ry - 8, 13, "#ffffff");
+    slanted(x, row[0], 376, ry, 24, "#ffffff", 0);
+    slanted(x, String(row[1]).padStart(4, "0"), 662, ry, 26, "#ffffff", 0, "right");
+    if (i < 2) { x.strokeStyle = "rgba(255,255,255,.25)"; x.lineWidth = 1.5; x.beginPath(); x.moveTo(326, ry + 18); x.lineTo(672, ry + 18); x.stroke(); }
+  });
+
+  /* skill */
+  panel(x, 60, 490, 630, 150, S);
+  tabLabel(x, 76, 494, "SKILL", S);
+  cutRect(x, 84, 522, 96, 96, 14); x.fillStyle = "rgba(255,255,255,.06)"; x.fill(); x.lineWidth = 2; x.strokeStyle = S.el[2][1]; x.stroke();
+  x.fillStyle = S.el[2][1]; x.font = "400 54px " + DISPLAY; x.textAlign = "center"; x.fillText(S.el[1], 132, 590); x.textAlign = "left";
+  var mvs = fitSize(x, S.move, DISPLAY, 30, 470, 18);
+  slanted(x, S.move, 204, 556, mvs, goldFill(x, 530, 560, S.el), 5);
+  x.fillStyle = "#f1e8ff"; x.font = "500 17px " + BODY;
+  wrapLines(x, S.skill, 470, 3).forEach(function (l, i) { x.fillText(l, 204, 586 + i * 22); });
+
+  /* description + defining moment + seal */
+  panel(x, 60, 690, 630, 200, S);
+  tabLabel(x, 76, 694, "DESCRIPTION", S);
+  x.save(); x.globalAlpha = .08; x.fillStyle = "#ffffff"; x.font = "400 170px " + DISPLAY; x.fillText(S.el[1], 500, 870); x.restore();
+  x.fillStyle = "#f1e8ff"; x.font = "500 17px " + BODY;
+  var dl = wrapLines(x, S.me.who, 500, 3);
+  dl.forEach(function (l, i) { x.fillText(l, 84, 740 + i * 23); });
+  if (S.moment) {
+    x.fillStyle = S.el[2][1]; x.font = "700 15px " + BODY; x.fillText("YOUR DEFINING MOMENT", 84, 740 + dl.length * 23 + 14);
+    x.fillStyle = "#ffffff"; x.font = "italic 500 16px " + BODY;
+    wrapLines(x, "“" + S.moment + "”", 500, 2).forEach(function (l, i) { x.fillText(l, 84, 740 + dl.length * 23 + 36 + i * 21); });
+  }
+  hanko(x, 636, 750, 74, S);
+
+  /* rarity / element / type */
+  [["RARITY", S.tier, null], ["ELEMENT", S.el[1], S.el[0]], ["TYPE", S.T.jp, S.T.name]].forEach(function (b, i) {
+    var bx = 92 + i * 200, by = 916;
+    tabLabel(x, bx + 10, by, b[0], S);
+    panel(x, bx, by + 10, 170, 78, S);
+    x.textAlign = "center";
+    if (i === 0) slanted(x, b[1], bx + 85, by + 70, 46, goldFill(x, by + 30, by + 70, S.el), 5, "center");
+    else {
+      var fs = fitSize(x, b[1], DISPLAY, i === 1 ? 40 : 28, 150, 16);
+      x.fillStyle = i === 1 ? S.el[2][1] : "#ffffff"; x.font = "400 " + fs + "px " + DISPLAY; x.fillText(b[1], bx + 85, by + (b[2] ? 56 : 66));
+      x.fillStyle = "#e9dcff"; x.font = "700 13px " + BODY; x.fillText(b[2].toUpperCase(), bx + 85, by + 78);
+    }
+    x.textAlign = "left";
+  });
+
+  /* holder strip */
+  x.fillStyle = "rgba(243,233,255,.75)"; x.font = "700 14px " + BODY;
+  var d = new Date(S.date), when = isNaN(d) ? "" : d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  x.fillText(("Holder: " + (S.holder || "Unknown hero") + " · Pulled " + when).toUpperCase().slice(0, 52), 70, 1022);
+  x.textAlign = "right"; x.fillText("ID " + S.code, W - 70, 1022); x.textAlign = "left";
 }
 
+/* ---------- rendering to images ---------- */
+function loadPortrait(S) {
+  var p = portraitOf(S.me);
+  if (!p) return Promise.resolve(null);
+  return new Promise(function (res) {
+    var img = new Image();
+    img.crossOrigin = "anonymous"; img.referrerPolicy = "no-referrer";
+    img.onload = function () { res(img); };
+    img.onerror = function () { res(null); };
+    img.src = p.img + (p.img.indexOf("?") < 0 ? "?card" : "&card");
+  });
+}
+function renderSide(S, side) {
+  return loadPortrait(S).then(function (img) {
+    var cv = document.createElement("canvas"), draw = side === "back" ? drawCardBack : drawCardFront;
+    try { draw(cv, S, img); return { url: cv.toDataURL("image/png"), cv: cv }; }
+    catch (e) { draw(cv, S, null); try { return { url: cv.toDataURL("image/png"), cv: cv }; } catch (e2) { return { url: "", cv: cv }; } }
+  });
+}
 function buildCard(S) {
   cardState = S;
   clearTimeout(cardTimer);
-  cardTimer = setTimeout(function () { paintCard(S); }, 60);
-}
-function paintCard(S) {
-  var cv = document.createElement("canvas"), p = portraitOf(S.me);
-  var finish = function (img) {
-    try {
-      drawCard(cv, S, img);
-      cardURL = cv.toDataURL("image/png");
-    } catch (e) {
-      drawCard(cv, S, null);
-      try { cardURL = cv.toDataURL("image/png"); } catch (e2) { cardURL = ""; }
-    }
-    if (cardState !== S) return;
-    $("cardImg").src = cardURL;
-    $("cardImg").alt = "Trading card: " + S.me.name + ", " + S.T.name + ", " + S.tier + ", " + S.sync + "% sync";
-    cardBlob = null;
-    if (cv.toBlob) try { cv.toBlob(function (b) { if (cardState === S) cardBlob = b; }, "image/png"); } catch (e) {}
-  };
-  if (!p) return finish(null);
-  var img = new Image();
-  img.crossOrigin = "anonymous";
-  img.referrerPolicy = "no-referrer";
-  img.onload = function () { finish(img); };
-  img.onerror = function () { finish(null); };
-  img.src = p.img + (p.img.indexOf("?") < 0 ? "?card" : "&card");
+  cardTimer = setTimeout(function () {
+    renderSide(S, "front").then(function (r) {
+      if (cardState !== S) return;
+      cardURL = r.url; cardBlob = null;
+      $("cardImg").src = r.url;
+      $("cardImg").alt = "Trading card: " + S.me.name + ", " + S.T.name + ", " + S.tier + ", level " + S.lv;
+      if (r.cv.toBlob) try { r.cv.toBlob(function (b) { if (cardState === S) cardBlob = b; }, "image/png"); } catch (e) {}
+    });
+  }, 60);
 }
 
-/* holographic tilt on the preview */
-(function () {
-  var wrap = $("cardWrap");
+/* holographic tilt on any card preview */
+function tilt(wrap) {
   if (!wrap || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   wrap.addEventListener("pointermove", function (e) {
     var r = wrap.getBoundingClientRect(), px = (e.clientX - r.left) / r.width, py = (e.clientY - r.top) / r.height;
@@ -990,10 +1317,9 @@ function paintCard(S) {
     wrap.style.setProperty("--mx", (px * 100).toFixed(1) + "%");
     wrap.style.setProperty("--my", (py * 100).toFixed(1) + "%");
   });
-  wrap.addEventListener("pointerleave", function () {
-    wrap.style.setProperty("--rx", "0deg"); wrap.style.setProperty("--ry", "0deg");
-  });
-})();
+  wrap.addEventListener("pointerleave", function () { wrap.style.setProperty("--rx", "0deg"); wrap.style.setProperty("--ry", "0deg"); });
+}
+tilt($("cardWrap"));
 
 /* ================= Shared helpers ================= */
 var thumbCache = {};
@@ -1249,10 +1575,21 @@ function drawWeb(me, links) {
 }
 
 /* ================= Result ================= */
-var lastPicks = null;
+var lastPicks = null, lastTot = null, lastMoment = null;
+function definingMoment(w, p) {
+  var n = normTraits(w.tot), top = TKEYS.slice().sort(function (a, b) { return n[b] - n[a]; });
+  var best = null, bs = -1;
+  w.shown.forEach(function (q, i) {
+    var a = q && q.a[p[i]];
+    if (!a) return;
+    var sc = (a.w[top[0]] || 0) * 2 + (a.w[top[1]] || 0) + i * .001;
+    if (sc > bs) { bs = sc; best = a.t; }
+  });
+  return best ? best.replace(/^"|"$/g, "") : null;
+}
 function renderResult(fresh) {
-  if (fresh) lastPicks = picks.slice();
-  var w = walk(lastPicks), profile = w.profile, order = rank(profile, pool);
+  if (fresh && !openedFromSaved) { lastPicks = picks.slice(); var ww = walk(lastPicks); lastTot = ww.tot; lastMoment = definingMoment(ww, lastPicks); }
+  var w = { tot: lastTot, profile: TKEYS.map(function (k) { return lastTot[k]; }) }, profile = w.profile, order = rank(profile, pool);
   var me = order[0].c, crew = order[1].c, rival = order[order.length - 1].c, T = TYPES[me.type];
   var sync = Math.max(1, Math.round(order[0].r * 100));
   var tier = sync >= 80 ? "SSR" : sync >= 62 ? "SR" : "R";
@@ -1274,7 +1611,7 @@ function renderResult(fresh) {
   $("resFlaw").textContent = me.flaw;
 
   /* character file */
-  var pw = Math.round((profile[0] * 3 + profile[5] * 2.5 + profile[6] * 1.5 + profile[2] * 1.2 + profile[1] + profile[3] + profile[4] + profile[7] + profile[8] + profile[9] * .5) * 43 + seeded(me.name)() * 97);
+  var pw = powerLevel(profile, me.name);
   var facts = [
     { k: "Your type", v: esc(T.name) + ' <span lang="ja">' + esc(T.jp) + "</span>", n: T.gist, cls: "type" },
     { k: "Sync rate", v: sync + "% · " + tier, n: "How closely your answers match " + me.name + ".", big: true },
@@ -1351,14 +1688,15 @@ function renderResult(fresh) {
 
   lastShare = "I got " + me.name + " (" + T.name + ", " + ROLES[me.role].toLowerCase() + ", " + me.series + ") with a " + sync + "% sync rate on the Which Anime Character Are You? quiz. My crewmate is " + crew.name + " and my rival is " + rival.name + ".";
   /* result code, history and trading card */
-  var code = encodeResult(lastPicks, pool);
+  var code = encodeTot(lastTot, pool);
   lastCode = code;
   $("resCode").textContent = code;
-  lastShare += " See my card: " + resultLink(code);
-  try { history.replaceState(null, "", "#r=" + code); } catch (e) {}
-  if (fresh && !openedFromSaved) addHistory({ code: code, name: me.name, type: me.type, series: me.series, sync: sync, tier: tier, spot: me.spot, pool: pool, date: new Date().toISOString() });
+  lastShare += " Card ID " + code + ": " + resultLink(code);
+  try { history.replaceState(null, "", "#c=" + code); } catch (e) {}
+  if (fresh && !openedFromSaved) addHistory({ code: code, tot: lastTot, moment: lastMoment, holder: getHolder(), name: me.name, type: me.type, series: me.series, sync: sync, tier: tier, spot: me.spot, pool: pool, date: new Date().toISOString() });
   $("sharedBanner").hidden = !viewingShared;
-  buildCard({ me: me, T: T, sync: sync, tier: tier, stats: stats, pw: pw, ending: pickEnding(normTraits(w.tot))[0], holder: getHolder(), serial: cardSerial(code), code: code });
+  var hEntry = loadHistory().filter(function (e) { return e.code === code; })[0];
+  buildCard(cardData(lastTot, pool, { moment: hEntry ? hEntry.moment : (viewingShared ? null : lastMoment), holder: viewingShared && hEntry ? hEntry.holder : getHolder(), date: hEntry ? hEntry.date : new Date().toISOString() }));
   $("cardStatus").textContent = "";
 
   $("status").textContent = "";
@@ -1372,23 +1710,22 @@ function renderResult(fresh) {
 }
 
 var viewingShared = false, openedFromSaved = false, lastCode = "";
-function getHolder() { try { return localStorage.getItem(HOLDER_KEY) || ""; } catch (e) { return ""; } }
 function clearHash() { try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {} }
-function openResult(p, poolKey, shared) {
+function openResult(tot, poolKey, shared, moment) {
   viewingShared = !!shared;
   openedFromSaved = true;
-  picks = p.slice();
+  lastTot = tot; lastPicks = []; lastMoment = moment || null;
   setPool(poolKey);
   renderResult(true);
   openedFromSaved = false;
 }
+function isMine(d) { var code = encodeTot(d.tot, d.pool); return loadHistory().filter(function (e) { return e.code === code; })[0]; }
 function openFromHash() {
-  var m = location.hash.match(/r=([0-9a-z]+)/i);
-  if (!m) return false;
-  var d = decodeResult(m[1]);
+  if (!/[#&](c|r)=/.test(location.hash)) return false;
+  var d = decodeAny(location.hash);
   if (!d) return false;
-  var mine = loadHistory().some(function (e) { return e.code === m[1].toLowerCase(); });
-  openResult(d.picks, d.pool, !mine);
+  var mine = isMine(d);
+  openResult(d.tot, d.pool, !mine, mine && mine.moment);
   return true;
 }
 function goCover() {
@@ -1410,27 +1747,24 @@ function begin() {
 document.querySelectorAll("[data-pool]").forEach(function (b) {
   b.addEventListener("click", function () {
     setPool(b.getAttribute("data-pool"));
-    if (!$("resultView").hidden && lastPicks) renderResult(false);
+    if (!$("resultView").hidden && lastTot) renderResult(false);
   });
 });
 setPool(pool);
 $("startBtn").addEventListener("click", begin);
 $("againBtn").addEventListener("click", goCover);
 $("sharedStart").addEventListener("click", begin);
-window.addEventListener("hashchange", function () { if (location.hash.indexOf("r=") >= 0 && "#r=" + lastCode !== location.hash) openFromHash(); });
+window.addEventListener("hashchange", function () { if (/[#&](c|r)=/.test(location.hash) && "#c=" + lastCode !== location.hash) openFromHash(); });
 
 /* history list */
 $("histList").addEventListener("click", function (e) {
-  var del = e.target.closest("[data-del]"), open = e.target.closest("[data-code]");
+  var del = e.target.closest("[data-del]"), open = e.target.closest("[data-i]");
   if (del) {
     var list = loadHistory(); list.splice(+del.getAttribute("data-del"), 1); saveHistory(list); renderHistory();
     var first = $("histList").querySelector(".hist-open"); (first || $("startBtn")).focus();
     return;
   }
-  if (open) {
-    var d = decodeResult(open.getAttribute("data-code"));
-    if (d) openResult(d.picks, d.pool, false);
-  }
+  if (open) openCardViewer(loadHistory()[+open.getAttribute("data-i")], open);
 });
 var clearArmed = false;
 $("histClear").addEventListener("click", function () {
@@ -1440,16 +1774,54 @@ $("histClear").addEventListener("click", function () {
 });
 $("codeForm").addEventListener("submit", function (e) {
   e.preventDefault();
-  var raw = $("codeInput").value, d = decodeResult(raw);
-  if (!d) { $("codeStatus").textContent = "That code doesn't match this version of the quiz. Check it was copied in full."; return; }
+  var d = decodeAny($("codeInput").value);
+  if (!d) { $("codeStatus").textContent = "That card ID doesn't check out. It has 14 letters and numbers, like 7KQ2-M9XD-PT3H-WZ. Check each character."; return; }
   $("codeStatus").textContent = "";
-  var code = encodeResult(d.picks, d.pool);
-  var mine = loadHistory().some(function (h) { return h.code === code; });
-  openedFromSaved = mine;
-  viewingShared = false;
-  picks = d.picks.slice(); setPool(d.pool);
-  renderResult(true);
-  openedFromSaved = false;
+  var mine = isMine(d);
+  if (mine) return openResult(d.tot, d.pool, false, mine.moment);
+  /* a code typed in on purpose (your backup on a new device) goes into this browser's history */
+  openResult(d.tot, d.pool, false, null);
+  var me = rank(TKEYS.map(function (k) { return d.tot[k]; }), d.pool)[0];
+  addHistory({ code: encodeTot(d.tot, d.pool), tot: d.tot, moment: null, holder: getHolder(), name: me.c.name, type: me.c.type, series: me.c.series, sync: Math.max(1, Math.round(me.r * 100)), tier: me.r >= .8 ? "SSR" : me.r >= .62 ? "SR" : "R", spot: me.c.spot, pool: d.pool, date: new Date().toISOString() });
+});
+
+/* card viewer for saved results: front and back */
+var viewerEntry = null, viewerReturn = null;
+function openCardViewer(entry, from) {
+  if (!entry) return;
+  var d = entry.tot ? { tot: entry.tot, pool: entry.pool || "any" } : decodeAny(entry.code);
+  if (!d) return;
+  viewerEntry = { d: d, e: entry }; viewerReturn = from || null;
+  var S = cardData(d.tot, d.pool, { moment: entry.moment, holder: entry.holder || getHolder(), date: entry.date });
+  $("dlgTitle").textContent = S.me.name;
+  $("dlgCode").textContent = S.code;
+  $("flip").classList.remove("flipped");
+  $("dlgFlip").textContent = "Show the back";
+  $("dlgFront").removeAttribute("src"); $("dlgBack").removeAttribute("src");
+  ensurePortraits([S.me]);
+  renderSide(S, "front").then(function (r) { $("dlgFront").src = r.url; $("dlgFront").alt = "Front of the card for " + S.me.name; });
+  renderSide(S, "back").then(function (r) { $("dlgBack").src = r.url; $("dlgBack").alt = "Back of the card for " + S.me.name + ": stats, skill, description, rarity, element and type"; });
+  var dlg = $("cardDialog");
+  if (dlg.showModal) dlg.showModal(); else dlg.setAttribute("open", "");
+  $("dlgFlip").focus();
+}
+function closeViewer() {
+  var dlg = $("cardDialog");
+  if (dlg.close) dlg.close(); else dlg.removeAttribute("open");
+  if (viewerReturn && document.contains(viewerReturn)) viewerReturn.focus();
+}
+function flipCard() {
+  var f = $("flip").classList.toggle("flipped");
+  $("dlgFlip").textContent = f ? "Show the front" : "Show the back";
+}
+$("dlgFlip").addEventListener("click", flipCard);
+$("flip").addEventListener("click", flipCard);
+$("dlgClose").addEventListener("click", closeViewer);
+$("cardDialog").addEventListener("click", function (e) { if (e.target === $("cardDialog")) closeViewer(); });
+$("dlgOpen").addEventListener("click", function () {
+  if (!viewerEntry) return;
+  var v = viewerEntry; closeViewer();
+  openResult(v.d.tot, v.d.pool, false, v.e.moment);
 });
 
 /* trading card actions */
@@ -1457,7 +1829,11 @@ $("codeForm").addEventListener("submit", function (e) {
 $("holderInput").addEventListener("input", function () {
   var v = $("holderInput").value.trim();
   try { localStorage.setItem(HOLDER_KEY, v); } catch (e) {}
-  if (cardState) buildCard(Object.assign({}, cardState, { holder: v }));
+  if (cardState) {
+    buildCard(Object.assign({}, cardState, { holder: v }));
+    var list = loadHistory(), hit = list.filter(function (e) { return e.code === cardState.code; })[0];
+    if (hit) { hit.holder = v; saveHistory(list); }
+  }
 });
 function cardFileName() { return (cardState ? cardState.me.name : "anime") .replace(/[^a-z0-9]+/gi, "-").toLowerCase() + "-card.png"; }
 $("cardDownload").addEventListener("click", function () {
@@ -1506,7 +1882,7 @@ var resizeTimer, lastNarrow = null;
 window.addEventListener("resize", function () {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(function () {
-    if ($("resultView").hidden || !lastPicks) return;
+    if ($("resultView").hidden || !lastTot) return;
     paintSplash();
     var narrow = $("web").clientWidth < 560;
     if (narrow !== lastNarrow) { lastNarrow = narrow; renderResult(false); }
@@ -1515,7 +1891,7 @@ window.addEventListener("resize", function () {
 if (document.fonts && document.fonts.load) {
   document.fonts.load('40px "Dela Gothic One"').then(function () {
     thumbCache = {};
-    if (!$("resultView").hidden && lastPicks) renderResult(false);
+    if (!$("resultView").hidden && lastTot) renderResult(false);
   }, function () {});
 }
 

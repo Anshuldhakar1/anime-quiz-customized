@@ -17,16 +17,21 @@ Everything runs in the browser. No build step, no server.
 Portraits are looked up while the page runs and shown straight from the source site, with a credit link. Nothing is copied into this repository.
 
 1. [AniList](https://anilist.co) public API, batched, and only accepted when the character's series matches.
-2. Fail-safe: [MyAnimeList](https://myanimelist.net) through the public [Jikan](https://jikan.moe) API, used when AniList has no picture, has only its placeholder, or the image fails to load.
-3. Otherwise, the quiz's own generated splash art.
+   It's searched by both the English and the Japanese name.
+2. Fail-safe: [MyAnimeList](https://myanimelist.net) through the public [Jikan](https://jikan.moe) API, used when AniList has no picture, has only its placeholder, or the image fails to load. Long-vowel spellings are treated as equal (Giyu = Giyuu).
+3. Second fail-safe: the character's anime cast list on MyAnimeList.
+4. Otherwise, the quiz's own generated splash art.
+
+A "not found" is only remembered for three days, so characters get retried.
 
 Lookups are cached in the visitor's browser.
 
-## History, result codes and trading cards
+## Card IDs, history and trading cards
 
-- **Past results** are saved in the visitor's browser and listed on the home page.
-- **Result codes** (and `#r=` links) encode the story version, the character filter and every answer, so the same code rebuilds the same result on any device. They work as share links and as backups, with no account or server.
-- **Trading card**: each result is drawn as a collectible card (portrait, type, tier, sync rate, graded battle stats, ending, catchphrase, holder name and serial number) that can be shared, downloaded as a PNG, or linked.
+- **Card ID**: every result gets a 14-character ID like `7KQ2-M9XD-PT3H-WZ`. It packs your trait totals and character filter, so typing it on any device (or opening `#c=ID`) rebuilds the same card. Confusable characters (O/0, I/L/1) are accepted either way, and the last character is a check that catches typos.
+- **History**: results are saved in the visitor's browser and listed on the home page. Tapping one opens the card viewer, where the card can be flipped. The back is only shown here.
+- **Trading card**: the front is the shareable side (portrait, name, rarity, HP/ATK/DEF, signature move, type, level, element). The back holds stats, skill, description, the player's defining moment from the story, a personal hanko seal, and rarity, element and type.
+- **What makes each card unique**, even for the same character: element and signature move come from the player's strongest trait; HP, ATK, DEF and level come from their answers; the flame and sparkle layout ("foil print") is seeded by the card ID; the hanko seal comes from the ID and holder name; and each card carries its holder, pull date and defining moment.
 
 ## GitHub Pages
 

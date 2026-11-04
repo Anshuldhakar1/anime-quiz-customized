@@ -803,6 +803,91 @@ function showPortrait(me) {
   watchImages($("reveal"));
 }
 
+/* ================= Full-body card art from Fandom wikis =================
+   For the card front, look up the character's page on their series' Fandom wiki and prefer
+   a file named like a full-body render; otherwise use the page's main (infobox) image when
+   it's tall. Images are official series art hosted by the wiki and are shown from the wiki's
+   own servers, credited on the card back with the wiki name and the uploader's username.
+   Falls back to the AniList / MyAnimeList portrait, then the generated art. */
+var WIKIS = {
+  "Naruto": "naruto", "One Piece": "onepiece", "Demon Slayer": "kimetsu-no-yaiba", "Sailor Moon": "sailormoon",
+  "Fruits Basket": "fruitsbasket", "Cowboy Bebop": "cowboybebop", "Spy x Family": "spy-x-family",
+  "Frieren: Beyond Journey's End": "frieren", "Fullmetal Alchemist: Brotherhood": "fma", "Haikyu!!": "haikyuu",
+  "Ouran High School Host Club": "ouran", "Dragon Ball": "dragonball", "Attack on Titan": "attackontitan",
+  "My Hero Academia": "myheroacademia", "Bleach": "bleach", "Jujutsu Kaisen": "jujutsu-kaisen", "Chainsaw Man": "chainsaw-man",
+  "Hunter x Hunter": "hunterxhunter", "One-Punch Man": "onepunchman", "Violet Evergarden": "violet-evergarden",
+  "Neon Genesis Evangelion": "evangelion", "Vinland Saga": "vinlandsaga", "Dr. Stone": "dr-stone", "Black Clover": "blackclover",
+  "Mob Psycho 100": "mob-psycho-100", "Kaguya-sama: Love Is War": "kaguyasama", "My Dress-Up Darling": "my-dress-up-darling",
+  "Cardcaptor Sakura": "ccsakura", "Code Geass": "codegeass", "Toradora!": "toradora", "Nisekoi": "nisekoi",
+  "A Certain Scientific Railgun": "toarumajutsunoindex", "Komi Can't Communicate": "komi-san", "Bocchi the Rock!": "bocchi-the-rock",
+  "Kimi ni Todoke": "kiminitodoke", "The Melancholy of Haruhi Suzumiya": "haruhi", "Don't Toy with Me, Miss Nagatoro": "nagatoro",
+  "Teasing Master Takagi-san": "karakai-jouzu-no-takagi-san", "Gintama": "gintama", "Hyouka": "hyouka",
+  "Love, Chunibyo & Other Delusions": "chuunibyou", "Steins;Gate": "steins-gate", "The Apothecary Diaries": "kusuriya-no-hitorigoto",
+  "Oshi no Ko": "oshi-no-ko", "Sword Art Online": "swordartonline", "Himouto! Umaru-chan": "himoutoumaruchan", "Kakegurui": "kakegurui",
+  "Re:Zero": "rezero", "JoJo's Bizarre Adventure": "jojo", "My Teen Romantic Comedy SNAFU": "oregairu", "Death Note": "deathnote",
+  "Berserk": "berserk", "Monster": "monster", "Psycho-Pass": "psychopass", "Akame ga Kill!": "akamegakill",
+  "Future Diary": "futurediary", "Happy Sugar Life": "happysugarlife", "Date A Live": "date-a-live", "Fate/stay night": "typemoon",
+  "The Familiar of Zero": "zeronotsukaima", "Rascal Does Not Dream of Bunny Girl Senpai": "aobuta", "Food Wars!": "shokugekinosoma",
+  "KonoSuba": "konosuba", "Gurren Lagann": "gurrenlagann", "Spice and Wolf": "spiceandwolf", "Fairy Tail": "fairytail", "Black Lagoon": "blacklagoon"
+};
+var BODY_KEY = "anime-quiz-bodyart-v1";
+var bodyArt = {}, bodyPending = {};
+try { bodyArt = JSON.parse(localStorage.getItem(BODY_KEY)) || {}; } catch (e) { bodyArt = {}; }
+Object.keys(bodyArt).forEach(function (k) { var b = bodyArt[k]; if (!b || (b.miss && Date.now() - b.miss > MISS_TTL)) delete bodyArt[k]; });
+function saveBody() { try { localStorage.setItem(BODY_KEY, JSON.stringify(bodyArt)); } catch (e) {} }
+function bodyArtOf(c) { var b = bodyArt[c.name]; return b && b.img ? b : null; }
+
+function wikiApi(wiki, params) {
+  var q = Object.keys(params).map(function (k) { return k + "=" + encodeURIComponent(params[k]); }).join("&");
+  return fetch("https://" + wiki + ".fandom.com/api.php?format=json&formatversion=2&origin=*&" + q).then(function (r) {
+    if (!r.ok) throw new Error("http");
+    return r.json();
+  });
+}
+function ensureBodyArt(c) {
+  if (!PORTRAITS_ONLINE || !c || bodyArt[c.name] !== undefined || bodyPending[c.name]) return;
+  var wiki = WIKIS[c.series];
+  if (!wiki) return;
+  bodyPending[c.name] = true;
+  var miss = function () { bodyArt[c.name] = { miss: Date.now() }; saveBody(); };
+  wikiApi(wiki, { action: "query", list: "search", srsearch: c.name, srnamespace: 0, srlimit: 6 }).then(function (j) {
+    var hits = (j.query && j.query.search) || [];
+    var page = hits.filter(function (h) { return nameMatches(c.name, h.title); })[0] ||
+               hits.filter(function (h) { return nameTokens(c.name).some(function (t) { return fold(h.title).indexOf(t) >= 0; }); })[0];
+    if (!page) throw new Error("none");
+    return wikiApi(wiki, { action: "query", titles: page.title, prop: "pageimages|images", piprop: "original|name", imlimit: 200, redirects: 1 }).then(function (k) {
+      var pg = k.query && k.query.pages && k.query.pages[0];
+      if (!pg) throw new Error("none");
+      var files = (pg.images || []).map(function (im) { return im.title; }).filter(function (t) { return /\.(png|jpe?g|webp)$/i.test(t); });
+      var first = nameTokens(c.name)[0] || "";
+      var mine = function (t) { return fold(t).indexOf(first) >= 0; };
+      var pref = files.filter(function (t) { return mine(t) && /full[\s_-]*body|fullbody/i.test(t); })
+        .concat(files.filter(function (t) { return mine(t) && /render|full|design|profile/i.test(t); }));
+      var cands = pref.slice(0, 4);
+      if (pg.pageimage) cands.push("File:" + pg.pageimage);
+      cands = cands.filter(function (t, i) { return cands.indexOf(t) === i; }).slice(0, 5);
+      if (!cands.length) throw new Error("none");
+      return wikiApi(wiki, { action: "query", titles: cands.join("|"), prop: "imageinfo", iiprop: "url|user|size" }).then(function (m) {
+        var info = {};
+        ((m.query && m.query.pages) || []).forEach(function (p) { if (p.imageinfo && p.imageinfo[0]) info[p.title] = p.imageinfo[0]; });
+        var norm = function (t) { return t.replace(/_/g, " "); };
+        var list = cands.map(function (t) { return info[norm(t)] ? { t: norm(t), i: info[norm(t)] } : null; }).filter(Boolean);
+        var tall = list.filter(function (x) { return x.i.height >= x.i.width * 1.15 && x.i.height >= 500; });
+        var pick = tall[0] || null;
+        if (!pick) throw new Error("none");
+        bodyArt[c.name] = {
+          img: pick.i.url, site: pick.i.descriptionurl || ("https://" + wiki + ".fandom.com/wiki/" + encodeURIComponent(pick.t)),
+          user: pick.i.user || "", wiki: c.series + " Wiki", w: pick.i.width, h: pick.i.height
+        };
+        saveBody();
+        refreshSoon();
+      });
+    });
+  }).catch(function (e) {
+    if (e && e.message === "none") miss();
+  }).then(function () { delete bodyPending[c.name]; });
+}
+
 /* ================= Card IDs and saved history =================
    A result depends only on the ten trait totals and the character filter, so a card ID packs
    exactly those into 13 Crockford base-32 characters plus one check character, written in
@@ -1215,6 +1300,8 @@ function drawCardBack(cv, S, portrait) {
   slanted(x, S.me.name, 124, 128, ns, goldFill(x, 90, 130, S.el), 7);
   x.fillStyle = "#e9dcff"; x.font = "700 16px " + BODY;
   x.fillText((S.T.name + " · " + S.T.jp + " / " + ROLES[S.me.role] + " · " + S.me.series).toUpperCase().slice(0, 52), 130, 176);
+  var credit = artCredit(S.me);
+  if (credit) { x.fillStyle = "rgba(233,220,255,.7)"; x.font = "600 13px " + BODY; x.fillText(credit.slice(0, 80), 130, 198); }
 
   /* portrait + battle stats */
   x.save(); cutRect(x, 60, 214, 220, 236, 26); x.clip();
@@ -1301,8 +1388,12 @@ function canDraw(img) {
   if (!img) return false;
   try { var c = document.createElement("canvas"); c.width = c.height = 2; var x = c.getContext("2d"); x.drawImage(img, 0, 0, 2, 2); x.getImageData(0, 0, 1, 1); return true; } catch (e) { return false; }
 }
+function cardArtFor(c, side) {
+  var body = bodyArtOf(c), face = portraitOf(c);
+  return side === "back" ? (face || body) : (body || face);
+}
 function loadPortrait(S, side) {
-  var p = portraitOf(S.me);
+  var p = cardArtFor(S.me, side);
   if (!p) return Promise.resolve(null);
   var url = side === "back" ? enhancedURL(p.img, 220 * CARD_K, 236 * CARD_K)
     : "https://wsrv.nl/?url=" + encodeURIComponent(p.img.replace(/^https?:\/\//, "")) + "&h=" + (816 * CARD_K) + "&fit=inside&sharp=1.2&q=92&output=png";
@@ -1318,6 +1409,13 @@ function renderSide(S, side) {
     catch (e) { draw(cv, S, null); try { return { url: cv.toDataURL("image/png"), cv: cv }; } catch (e2) { return { url: "", cv: cv }; } }
   });
 }
+/* Who to credit for the art on the card front. */
+function artCredit(c) {
+  var b = bodyArtOf(c), p = portraitOf(c);
+  if (b) return "Card art: " + b.wiki + " on Fandom" + (b.user ? ", uploaded by " + b.user : "");
+  if (p) return "Card art: " + p.src;
+  return "";
+}
 function buildCard(S) {
   cardState = S;
   clearTimeout(cardTimer);
@@ -1326,6 +1424,9 @@ function buildCard(S) {
       if (cardState !== S) return;
       cardURL = r.url; cardBlob = null;
       $("cardImg").src = r.url;
+      var b = bodyArtOf(S.me), p = portraitOf(S.me);
+      $("cardCredit").innerHTML = b ? 'Card art from the <a href="' + esc(b.site) + '" target="_blank" rel="noopener">' + esc(b.wiki) + "</a> on Fandom" + (b.user ? ", uploaded by " + esc(b.user) : "") + "."
+        : p ? 'Card art from <a href="' + esc(p.site) + '" target="_blank" rel="noopener">' + esc(p.src) + "</a>." : "";
       $("cardImg").alt = "Front of your trading card: " + S.me.name + ", " + S.T.name + ", " + S.tier + ", " + S.el[0] + " element";
       if (r.cv.toBlob) try { r.cv.toBlob(function (b) { if (cardState === S) cardBlob = b; }, "image/png"); } catch (e) {}
     });
@@ -1685,6 +1786,7 @@ function renderResult(fresh) {
   add(TYPES[bonusType].name + " route", "route", firstWhere(order, function (x) { return x.type === bonusType; }, used), "Who you'd be if you leaned that way.");
   add("Comic relief", "route", firstWhere(order, function (x) { return x.type === "baka" || x.type === "genki"; }, used), "The one who'd keep you laughing.");
   ensurePortraits([me].concat(links.map(function (l) { return l.c; })));
+  ensureBodyArt(me);
   showPortrait(me);
   drawWeb(me, links);
 
@@ -1829,7 +1931,7 @@ function openCardViewer(entry, from) {
   $("flip").classList.remove("flipped");
   $("dlgFlip").textContent = "Show the back";
   $("dlgFront").removeAttribute("src"); $("dlgBack").removeAttribute("src");
-  ensurePortraits([S.me]);
+  ensurePortraits([S.me]); ensureBodyArt(S.me);
   renderSide(S, "front").then(function (r) { $("dlgFront").src = r.url; $("dlgFront").alt = "Front of the card for " + S.me.name; });
   renderSide(S, "back").then(function (r) { $("dlgBack").src = r.url; $("dlgBack").alt = "Back of the card for " + S.me.name + ": stats, skill, description, rarity, element and type"; });
   var dlg = $("cardDialog");

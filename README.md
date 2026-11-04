@@ -26,6 +26,10 @@ A "not found" is only remembered for three days, so characters get retried.
 
 Lookups are cached in the visitor's browser.
 
+## Full-body card art
+
+The card front prefers a full-body image from the character's series wiki on [Fandom](https://www.fandom.com) (official series art hosted by the wiki). It searches the wiki for the character's page, prefers files named like full-body renders, and only accepts tall images. The image is shown from the wiki's own servers and credited on the card back and the results page with the wiki name and the uploader's username. If there's no suitable wiki image, the card uses the AniList or MyAnimeList portrait.
+
 ## Card IDs, history and trading cards
 
 - **Card ID**: every result gets a 14-character ID like `7KQ2-M9XD-PT3H-WZ`. It packs your trait totals and character filter, so typing it on any device (or opening `#c=ID`) rebuilds the same card. Confusable characters (O/0, I/L/1) are accepted either way, and the last character is a check that catches typos.

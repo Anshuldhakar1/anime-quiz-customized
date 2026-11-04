@@ -90,6 +90,7 @@ function inked(x, pathFn, fill, ink, lw, off) {
   x.lineWidth = lw; x.strokeStyle = ink; x.lineJoin = "round"; x.stroke();
 }
 
+var SPLASH_CALM = false;
 function drawSplash(cv, c, T, fw, fh) {
   var w = fw || cv.clientWidth, h = fh || cv.clientHeight;
   if (!w || !h) return;
@@ -461,6 +462,9 @@ function drawSplash(cv, c, T, fw, fh) {
   }
 
   }
+  /* calm mode (trading cards): skip particles, focus lines, screentone and lettering */
+  if (SPLASH_CALM) return;
+
   /* particles */
   var count = art ? 14 : 34 + Math.floor(R() * 14);
   for (n = 0; n < count; n++) {
@@ -1055,7 +1059,8 @@ function cardFrame(x, W, H, S, R) {
   x.beginPath(); x.moveTo(W - 52, H - 260); x.lineTo(W - 52, H - 150); x.stroke();
   for (var s = 0; s < 6; s++) x.fillRect(W - 66, H - 250 + s * 14, 10, 6);
 }
-function ribbon(x, W, S) {
+function ribbon(x, W, S, showSync) {
+  if (showSync === undefined) showSync = true;
   var X = W - 150, Y = 26, w = 96, h = 210;
   var g = x.createLinearGradient(X, Y, X + w, Y + h);
   g.addColorStop(0, "#ffd24a"); g.addColorStop(.6, "#ff8a1f"); g.addColorStop(1, "#ff4d1f");
@@ -1065,22 +1070,7 @@ function ribbon(x, W, S) {
   x.strokeStyle = "rgba(255,255,255,.6)"; x.lineWidth = 2; x.stroke();
   var size = S.tier.length > 2 ? 46 : S.tier.length > 1 ? 58 : 74;
   slanted(x, S.tier, X + w / 2 + 4, Y + 92, size, "#ffffff", 7, "center");
-  x.font = "700 15px " + BODY; x.textAlign = "center"; x.fillStyle = "#2a0a00";
-  x.fillText(S.sync + "% SYNC", X + w / 2, Y + 140); x.textAlign = "left";
-}
-function artLayer(x, X, Y, W, H, S, portrait) {
-  x.save(); rrect(x, X, Y, W, H, 18); x.clip();
-  if (portrait) {
-    var sc = Math.max(W / portrait.naturalWidth, H / portrait.naturalHeight);
-    var iw = portrait.naturalWidth * sc, ih = portrait.naturalHeight * sc;
-    x.drawImage(portrait, X + (W - iw) / 2, Y, iw, ih);
-  } else {
-    var art = document.createElement("canvas"), keep = current;
-    current = { c: S.me, portrait: false };
-    try { drawSplash(art, S.me, S.T, W, H); x.drawImage(art, X, Y, W, H); } catch (e) {}
-    current = keep;
-  }
-  x.restore();
+  if (showSync) { x.font = "700 15px " + BODY; x.textAlign = "center"; x.fillStyle = "#2a0a00"; x.fillText(S.sync + "% SYNC", X + w / 2, Y + 140); x.textAlign = "left"; }
 }
 function tabLabel(x, X, Y, text, S) {
   x.font = "400 24px " + DISPLAY;
@@ -1096,9 +1086,68 @@ function panel(x, X, Y, W, H, S) {
   x.lineWidth = 2.5; x.strokeStyle = rgba(S.el[2][1], .8); x.stroke();
 }
 
+/* Gold-and-element frame: a solid band around the art with an inner bevel and corner jewels. */
+function cardFrameClean(x, W, H, S) {
+  var cols = S.el[2];
+  var band = x.createLinearGradient(0, 0, W, H);
+  band.addColorStop(0, "#fff0b8"); band.addColorStop(.25, "#d9a43a"); band.addColorStop(.5, mix(cols[1], "#ffe7a0", .4));
+  band.addColorStop(.75, "#b8812a"); band.addColorStop(1, "#ffe7a0");
+  x.save();
+  var sub = function (X, Y, w, h, r) { x.moveTo(X + r, Y); x.arcTo(X + w, Y, X + w, Y + h, r); x.arcTo(X + w, Y + h, X, Y + h, r); x.arcTo(X, Y + h, X, Y, r); x.arcTo(X, Y, X + w, Y, r); x.closePath(); };
+  x.beginPath(); sub(10, 10, W - 20, H - 20, 30); sub(34, 34, W - 68, H - 68, 16);
+  x.fillStyle = band; x.fill("evenodd");
+  x.restore();
+  x.lineWidth = 2; x.strokeStyle = "rgba(60,30,0,.7)"; rrect(x, 10, 10, W - 20, H - 20, 30); x.stroke();
+  x.lineWidth = 3; x.strokeStyle = "#2a1400"; rrect(x, 34, 34, W - 68, H - 68, 16); x.stroke();
+  x.lineWidth = 1.5; x.strokeStyle = rgba(cols[2], .7); rrect(x, 40, 40, W - 80, H - 80, 12); x.stroke();
+  [[22, 22], [W - 22, 22], [22, H - 22], [W - 22, H - 22]].forEach(function (p) {
+    x.save(); x.translate(p[0], p[1]); x.rotate(Math.PI / 4);
+    x.fillStyle = cols[0]; x.fillRect(-9, -9, 18, 18);
+    x.lineWidth = 2; x.strokeStyle = "#2a1400"; x.strokeRect(-9, -9, 18, 18);
+    x.fillStyle = "rgba(255,255,255,.6)"; x.fillRect(-6, -6, 5, 5);
+    x.restore();
+  });
+}
+/* Soft backdrop from the portrait itself: shrink it to a few pixels and scale back up. */
+function blurredBackdrop(x, img, X, Y, W, H, S) {
+  var t = document.createElement("canvas"); t.width = 18; t.height = 26;
+  var tx = t.getContext("2d"), sc = Math.max(18 / img.naturalWidth, 26 / img.naturalHeight);
+  tx.drawImage(img, (18 - img.naturalWidth * sc) / 2, (26 - img.naturalHeight * sc) / 2, img.naturalWidth * sc, img.naturalHeight * sc);
+  x.save(); x.imageSmoothingEnabled = true; x.imageSmoothingQuality = "high";
+  x.drawImage(t, X - 20, Y - 20, W + 40, H + 40);
+  x.restore();
+  var g = x.createLinearGradient(0, Y, 0, Y + H);
+  g.addColorStop(0, rgba(mix("#0d0618", S.me.spot, .2), .55)); g.addColorStop(1, "rgba(8,3,14,.8)");
+  x.fillStyle = g; x.fillRect(X, Y, W, H);
+  var v = x.createRadialGradient(X + W / 2, Y + H * .42, W * .2, X + W / 2, Y + H * .5, W * .9);
+  v.addColorStop(0, rgba(S.el[2][1], .18)); v.addColorStop(1, "rgba(0,0,0,.45)");
+  x.fillStyle = v; x.fillRect(X, Y, W, H);
+}
+/* Art window: the whole picture, uncropped, over its own blurred backdrop. */
+function artLayer(x, X, Y, W, H, S, portrait, crop, fitH) {
+  var FH = fitH || H;
+  x.save(); rrect(x, X, Y, W, H, 12); x.clip();
+  if (portrait) {
+    blurredBackdrop(x, portrait, X, Y, W, H, S);
+    var sc = crop ? Math.max(W / portrait.naturalWidth, H / portrait.naturalHeight) : Math.min(W / portrait.naturalWidth, FH / portrait.naturalHeight);
+    var iw = portrait.naturalWidth * sc, ih = portrait.naturalHeight * sc;
+    x.save(); x.shadowColor = "rgba(0,0,0,.55)"; x.shadowBlur = crop ? 0 : 30;
+    x.drawImage(portrait, X + (W - iw) / 2, crop ? Y : Y + FH - ih, iw, ih);
+    x.restore();
+  } else {
+    var art = document.createElement("canvas"), keep = current;
+    current = { c: S.me, portrait: false };
+    SPLASH_CALM = true;
+    try { drawSplash(art, S.me, S.T, W, H); x.drawImage(art, X, Y, W, H); } catch (e) {}
+    SPLASH_CALM = false;
+    current = keep;
+  }
+  x.restore();
+}
+
 /* ---------- front: the shareable side ----------
-   Portrait, name, rarity + sync rate, element, top three battle stat grades,
-   signature move, type / role, power level, holder and card ID. */
+   A framed picture with a nameplate: rarity ribbon, name, type / role, and a match badge
+   showing how closely the character matches you. Everything else is on the back. */
 var CARD_K = 2; /* drawn at twice the size for a crisp download */
 function startCanvas(cv) {
   var x = cv.getContext("2d");
@@ -1108,72 +1157,46 @@ function startCanvas(cv) {
   return x;
 }
 function drawCardFront(cv, S, portrait) {
-  var W = 750, H = 1050, x = startCanvas(cv), R = seeded("front|" + S.code);
-  cardBackground(x, W, H, S, R);
-  artLayer(x, 40, 40, W - 80, 760, S, portrait);
-  var fade = x.createLinearGradient(0, 540, 0, 860);
-  fade.addColorStop(0, "rgba(10,3,18,0)"); fade.addColorStop(1, "rgba(10,3,18,.96)");
-  x.save(); rrect(x, 40, 40, W - 80, H - 80, 20); x.clip(); x.fillStyle = fade; x.fillRect(0, 0, W, H); x.fillStyle = "rgba(10,3,18,.96)"; x.fillRect(0, 860, W, H); x.restore();
-  cardFlames(x, W, H, S, R, 14, [[20, 140, 110, 760, 1.2], [480, 40, 740, 240, 2.6], [20, 860, 700, 1030, .2], [420, 600, 720, 820, 2.2]]);
-  cardFrame(x, W, H, S, R);
-  ribbon(x, W, S);
+  var W = 750, H = 1050, x = startCanvas(cv);
+  x.fillStyle = "#07030c"; rrect(x, 0, 0, W, H, 40); x.fill();
+  artLayer(x, 40, 40, W - 80, H - 80, S, portrait, false, 816);
 
-  /* element seal */
-  x.save(); x.translate(612, 690);
-  starPath(x, 0, 0, 72, 52, 14, R()); x.shadowColor = S.el[2][0]; x.shadowBlur = 26;
-  x.fillStyle = goldFill(x, -70, 70, null); x.fill(); x.shadowBlur = 0;
-  x.lineWidth = 3; x.strokeStyle = "#5a2600"; x.stroke();
-  x.fillStyle = "#3a1200"; x.textAlign = "center"; x.textBaseline = "middle";
-  x.font = "400 46px " + DISPLAY; x.fillText(S.el[1], 0, -6);
-  x.font = "700 13px " + BODY; x.fillText(S.el[0].toUpperCase(), 0, 30);
-  x.restore(); x.textAlign = "left"; x.textBaseline = "alphabetic";
+  /* nameplate, joined to the frame at the bottom */
+  var py = 846, ph = 164;
+  var plate = x.createLinearGradient(0, py, 0, py + ph);
+  plate.addColorStop(0, rgba(mix("#1a0a2a", S.me.spot, .25), .94)); plate.addColorStop(1, "rgba(10,4,18,.98)");
+  x.beginPath(); x.moveTo(40, py + 26); x.lineTo(90, py); x.lineTo(W - 90, py); x.lineTo(W - 40, py + 26); x.lineTo(W - 40, H - 40); x.lineTo(40, H - 40); x.closePath();
+  x.fillStyle = plate; x.fill();
+  x.lineWidth = 3; x.strokeStyle = "#d9a43a";
+  x.beginPath(); x.moveTo(40, py + 26); x.lineTo(90, py); x.lineTo(W - 90, py); x.lineTo(W - 40, py + 26); x.stroke();
+  x.lineWidth = 1.5; x.strokeStyle = rgba(S.el[2][1], .7);
+  x.beginPath(); x.moveTo(60, py + 34); x.lineTo(98, py + 10); x.lineTo(W - 98, py + 10); x.lineTo(W - 60, py + 34); x.stroke();
 
-  /* name */
-  var name = S.me.name, parts = name.split(" "), lines = [name];
-  x.font = "400 64px " + DISPLAY;
-  if (x.measureText(name).width > 470 && parts.length > 1) { var cut = Math.ceil(parts.length / 2); lines = [parts.slice(0, cut).join(" "), parts.slice(cut).join(" ")]; }
-  var size = Math.min.apply(null, lines.map(function (l) { return fitSize(x, l, DISPLAY, 64, 470, 30); }));
-  lines.forEach(function (l, i) { slanted(x, l, 86, 792 - (lines.length - 1 - i) * (size + 4), size, goldFill(x, 700, 800, S.el), 9); });
+  cardFrameClean(x, W, H, S);
+  ribbon(x, W, S, false);
 
-  /* top three battle stat grades */
-  var top3 = S.stats.slice().sort(function (a, b) { return b[1] - a[1]; }).slice(0, 3);
-  var segCols = ["#b8e03a", "#ffa41f", "#ff5f2e"];
-  x.save(); x.transform(1, 0, -0.25, 1, 0, 0);
-  top3.forEach(function (st, i) {
-    var sx = 280 + i * 152, by = 826;
-    var g = x.createLinearGradient(sx, 0, sx + 148, 0); g.addColorStop(0, segCols[i]); g.addColorStop(1, mix(segCols[i], "#3a1200", .25));
-    x.fillStyle = g; x.fillRect(sx, by, 148, 42);
-    x.fillStyle = "#2a0d00";
-    var label = st[0].toUpperCase(), fsz = 15;
-    do { x.font = "700 " + fsz + "px " + BODY; fsz--; } while (x.measureText(label).width > 98 && fsz > 9);
-    x.fillText(label, sx + 10, by + 27);
-    x.font = "400 26px " + DISPLAY; x.textAlign = "right"; x.fillText(grade(st[1]), sx + 138, by + 32); x.textAlign = "left";
-  });
-  x.restore();
+  /* name and type */
+  var name = S.me.name, nameW = 470;
+  var size = fitSize(x, name, DISPLAY, 58, nameW, 26);
+  slanted(x, name, 76, py + 82, size, goldFill(x, py + 30, py + 86, S.el), 8);
+  x.fillStyle = "#f3e9ff"; x.font = "700 17px " + BODY;
+  x.fillText((S.T.name + " · " + S.T.jp + " / " + ROLES[S.me.role]).toUpperCase(), 82, py + 120);
+  x.fillStyle = "rgba(243,233,255,.6)"; x.font = "700 14px " + BODY;
+  var series = S.me.series; while (x.measureText(series).width > 460 && series.length > 8) series = series.slice(0, -2);
+  x.fillText(series + (series !== S.me.series ? "…" : ""), 82, py + 144);
 
-  /* signature move + tag */
-  var ms = fitSize(x, S.move, DISPLAY, 40, 440, 22);
-  slanted(x, S.move, 340, 918, ms, goldFill(x, 880, 920, S.el), 7, "center");
-  x.strokeStyle = rgba(S.el[2][1], .8); x.lineWidth = 2;
-  x.beginPath(); x.moveTo(130, 942); x.lineTo(550, 942); x.stroke();
-  x.fillStyle = "#f3e9ff"; x.font = "700 17px " + BODY; x.textAlign = "center";
-  x.fillText((S.T.name + " / " + ROLES[S.me.role]).toUpperCase().split("").join(String.fromCharCode(8202)), 340, 968);
-
-  /* power level badge */
-  x.save(); x.translate(640, 912);
-  x.shadowColor = "#3fa8ff"; x.shadowBlur = 24;
-  x.beginPath(); x.arc(0, 0, 62, 0, 7); x.fillStyle = "#0b1d4a"; x.fill();
-  x.shadowBlur = 0; x.lineWidth = 6; x.strokeStyle = "#3fa8ff"; x.stroke();
-  x.lineWidth = 2; x.strokeStyle = "#ffd24a"; x.beginPath(); x.arc(0, 0, 52, 0, 7); x.stroke();
-  x.textAlign = "center"; x.fillStyle = "#ffffff"; x.font = "400 17px " + DISPLAY; x.fillText("PWR", 0, -14);
-  var pws = S.pw.toLocaleString("en-US");
-  x.fillStyle = goldFill(x, -4, 30, null); x.font = "400 " + (pws.length > 5 ? 26 : 30) + "px " + DISPLAY; x.fillText(pws, 0, 22);
+  /* match badge */
+  x.save(); x.translate(W - 118, py + 70);
+  x.shadowColor = S.el[2][0]; x.shadowBlur = 22;
+  x.beginPath(); x.arc(0, 0, 66, 0, 7); x.fillStyle = "#10071c"; x.fill();
+  x.shadowBlur = 0; x.lineWidth = 6; x.strokeStyle = "#d9a43a"; x.stroke();
+  x.lineWidth = 8; x.strokeStyle = S.el[2][0];
+  x.beginPath(); x.arc(0, 0, 54, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * S.sync / 100); x.stroke();
+  x.lineWidth = 8; x.strokeStyle = "rgba(255,255,255,.12)";
+  x.beginPath(); x.arc(0, 0, 54, -Math.PI / 2 + Math.PI * 2 * S.sync / 100, Math.PI * 1.5); x.stroke();
+  x.textAlign = "center"; x.fillStyle = "#ffffff"; x.font = "700 14px " + BODY; x.fillText("MATCH", 0, -12);
+  x.fillStyle = goldFill(x, -8, 30, null); x.font = "400 36px " + DISPLAY; x.fillText(S.sync + "%", 0, 26);
   x.restore(); x.textAlign = "left";
-
-  /* holder + id */
-  x.fillStyle = "rgba(243,233,255,.8)"; x.font = "700 14px " + BODY; x.textAlign = "center";
-  x.fillText(("Holder: " + (S.holder || "Unknown hero")).toUpperCase().slice(0, 26) + "  ·  ID " + S.code, 300, 1004);
-  x.textAlign = "left";
 }
 
 /* ---------- back ----------
@@ -1182,9 +1205,8 @@ function drawCardFront(cv, S, portrait) {
 function drawCardBack(cv, S, portrait) {
   var W = 750, H = 1050, x = startCanvas(cv), R = seeded("back|" + S.code);
   cardBackground(x, W, H, S, R);
-  cardFlames(x, W, H, S, R, 9, [[20, 40, 260, 160, 2.9], [20, 860, 740, 1030, .3], [600, 300, 740, 860, 1.6]]);
-  cardFrame(x, W, H, S, R);
-  ribbon(x, W, S);
+  cardFrameClean(x, W, H, S);
+  ribbon(x, W, S, true);
 
   /* header */
   x.strokeStyle = rgba(S.el[2][1], .9); x.lineWidth = 3;
@@ -1199,7 +1221,7 @@ function drawCardBack(cv, S, portrait) {
   if (portrait) {
     var sc = Math.max(220 / portrait.naturalWidth, 236 / portrait.naturalHeight);
     x.drawImage(portrait, 60 + (220 - portrait.naturalWidth * sc) / 2, 214, portrait.naturalWidth * sc, portrait.naturalHeight * sc);
-  } else { artLayer(x, 60, 214, 220, 236, S, null); }
+  } else { artLayer(x, 60, 214, 220, 236, S, null, true); }
   x.restore();
   cutRect(x, 60, 214, 220, 236, 26); x.lineWidth = 3; x.strokeStyle = S.el[2][1]; x.stroke();
   panel(x, 308, 236, 382, 214, S);
@@ -1282,8 +1304,9 @@ function canDraw(img) {
 function loadPortrait(S, side) {
   var p = portraitOf(S.me);
   if (!p) return Promise.resolve(null);
-  var w = side === "back" ? 220 : 670, h = side === "back" ? 236 : 760;
-  return loadImg(enhancedURL(p.img, w * CARD_K, h * CARD_K)).then(function (img) {
+  var url = side === "back" ? enhancedURL(p.img, 220 * CARD_K, 236 * CARD_K)
+    : "https://wsrv.nl/?url=" + encodeURIComponent(p.img.replace(/^https?:\/\//, "")) + "&h=" + (816 * CARD_K) + "&fit=inside&sharp=1.2&q=92&output=png";
+  return loadImg(url).then(function (img) {
     if (canDraw(img)) return img;
     return loadImg(p.img + (p.img.indexOf("?") < 0 ? "?card" : "&card")).then(function (raw) { return canDraw(raw) ? raw : null; });
   });

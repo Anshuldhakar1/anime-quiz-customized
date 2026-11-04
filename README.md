@@ -31,9 +31,9 @@ Lookups are cached in the visitor's browser.
 - **Card ID**: every result gets a 14-character ID like `7KQ2-M9XD-PT3H-WZ`. It packs your trait totals and character filter, so typing it on any device (or opening `#c=ID`) rebuilds the same card. Confusable characters (O/0, I/L/1) are accepted either way, and the last character is a check that catches typos.
 - **History**: results are saved in the visitor's browser and listed on the home page. Tapping one opens the card viewer.
 - **Trading card** (drawn at 1500 × 2100, flips on the results page and in the history viewer):
-  - **Front** (the shareable side): portrait, name, rarity and sync rate, element, top three battle stat grades, signature move, type and role, power level, holder and card ID.
+  - **Front** (the shareable side): a gold frame around the full, uncropped picture on a soft blurred backdrop, a rarity ribbon, and a nameplate with the name, type, role, series and a match badge showing how closely the character matches the player.
   - **Back**: name with type, role and series; portrait; all eight battle stat grades; signature move and skill; description; ending; power level; rarity, element and type; holder, pull date and card ID.
-  - The card's portrait goes through [wsrv.nl](https://wsrv.nl), an open-source image service that crops around the face, sizes it to the art window and sharpens it. If that fails, the original image is used, then the generated art.
+  - The card's picture goes through [wsrv.nl](https://wsrv.nl), an open-source image service that resizes and sharpens it (and crops around the face for the back's thumbnail). If that fails, the original image is used, then the generated art.
 - **What makes each card unique**, even for the same character: the element and signature move come from the player's strongest trait; the stat grades, sync rate, rarity, ending and power level come from their answers; the flame and sparkle layout ("foil print") is seeded by the card ID; and each card carries its holder, pull date and ID.
 
 ## GitHub Pages
